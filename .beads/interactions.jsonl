@@ -1,0 +1,2 @@
+{"id":"int-ab1eaf580091ce452324bbcad6a706b0","kind":"field_change","created_at":"2026-09-08T02:40:36.610356Z","actor":"Ethan John","issue_id":"asco-9gk","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"CEO resolved the escalation."}}
+{"id":"int-0bc519eed031379a89c85ac510682f4e","kind":"field_change","created_at":"2026-09-08T02:41:16.697813Z","actor":"Ethan John","issue_id":"asco-9d9","extra":{"field":"assignee","new_value":"asco-runner","old_value":""}}
