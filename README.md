@@ -27,6 +27,6 @@ python3 -m asco.cli run
 python3 -m asco.cli tui
 ```
 
-The TUI uses `r` to start the runner, `s` to stop the runner, `e` to resolve the first CEO escalation, and `q` to quit.
+The TUI is a read-only status view that refreshes every second. Run the dispatcher and native `bd` commands from another terminal, and press `q` to quit the TUI.
 
 The first pilot intentionally runs one Engineer subprocess at a time.
