@@ -16,16 +16,15 @@ The runner uses Codex automatic-approval mode inside a dedicated task worktree. 
 
 ```sh
 brew install beads
-python3 -m pip install -e .
 bd init --prefix asco
 ```
 
 ## Commands
 
 ```sh
-asco submit "Describe the task" "Estimate and break this request into deliverable work."
-asco run
-asco tui
+python3 -m asco.cli submit "Describe the task" "Estimate and break this request into deliverable work."
+python3 -m asco.cli run
+python3 -m asco.cli tui
 ```
 
 The TUI uses `r` to start the runner, `s` to stop the runner, `e` to resolve the first CEO escalation, and `q` to quit.
