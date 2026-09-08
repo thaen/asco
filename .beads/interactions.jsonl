@@ -3,3 +3,6 @@
 {"id":"int-00708896ecb5d690b4dc76c5e83ec87a","kind":"field_change","created_at":"2026-09-08T02:42:34.611112Z","actor":"Ethan John","issue_id":"asco-9d9","extra":{"field":"status","new_value":"open","old_value":"in_progress"}}
 {"id":"int-6ed158bec28aecc9088bbe887f368a4a","kind":"field_change","created_at":"2026-09-08T02:42:34.611638Z","actor":"Ethan John","issue_id":"asco-9d9","extra":{"field":"assignee","new_value":"","old_value":"asco-runner"}}
 {"id":"int-bc3f7dee22e7ab1721ab18eb3e70075c","kind":"field_change","created_at":"2026-09-08T02:43:39.772306Z","actor":"Ethan John","issue_id":"asco-9d9","extra":{"field":"assignee","new_value":"asco-runner","old_value":""}}
+{"id":"int-d09e75bbbbee71766995eea8a30aedd0","kind":"field_change","created_at":"2026-09-08T02:45:54.041254Z","actor":"Ethan John","issue_id":"asco-9d9","extra":{"field":"status","new_value":"open","old_value":"in_progress"}}
+{"id":"int-4f288338167c6551b0e497e7b202a823","kind":"field_change","created_at":"2026-09-08T02:45:54.041892Z","actor":"Ethan John","issue_id":"asco-9d9","extra":{"field":"assignee","new_value":"","old_value":"asco-runner"}}
+{"id":"int-5dd69711a667d99666bd785e76b99a3c","kind":"field_change","created_at":"2026-09-08T02:46:12.545819Z","actor":"Ethan John","issue_id":"asco-9d9","extra":{"field":"assignee","new_value":"asco-runner","old_value":""}}

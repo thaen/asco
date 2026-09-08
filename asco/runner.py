@@ -64,7 +64,20 @@ class Runner:
         task_id = issue_id(issue)
         try:
             workdir = self.worktree_for(issue) if issue_type(issue) == "engineering" else self.root
-            result = subprocess.run(["codex", "exec", "--approve-for-me", "--cd", str(workdir), self.prompt_for(issue, workdir)], cwd=workdir)
+            result = subprocess.run(
+                [
+                    "codex",
+                    "exec",
+                    "--sandbox",
+                    "workspace-write",
+                    "--add-dir",
+                    str(self.root / ".beads"),
+                    "--cd",
+                    str(workdir),
+                    self.prompt_for(issue, workdir),
+                ],
+                cwd=workdir,
+            )
         except Exception as error:
             self.beads.comment(task_id, f"Asco runner could not start Codex: {error}")
             raise
