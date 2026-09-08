@@ -52,7 +52,13 @@ class AscoTui:
         if not answer:
             self.message = "The escalation remains open because no answer was supplied."
             return
-        subprocess.run(["python3", "-m", "asco.cli", "resolve", issue_id(escalation), answer], cwd=self.root, check=True)
+        metadata = escalation.get("metadata") or {}
+        blocked_task = metadata.get("asco", {}).get("blocked_task")
+        self.beads.comment(issue_id(escalation), f"CEO decision: {answer}")
+        self.beads.close(issue_id(escalation), "CEO resolved the escalation.")
+        if blocked_task:
+            self.beads.update(str(blocked_task), "--status", "open")
+            self.beads.comment(str(blocked_task), f"CEO answer from {issue_id(escalation)}: {answer}")
         self.message = f"Resolved {issue_id(escalation)}."
 
     def draw(self, screen: curses.window) -> None:

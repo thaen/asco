@@ -8,7 +8,7 @@ Asco is a small terminal dispatcher for one software-engineering agent. It store
 CEO task → Engineer Bead → Audit Bead → corrections and successor audit → pull request
 ```
 
-Every submitted task creates an Engineer Bead and a dependent Audit Bead. The Audit Bead is a child of its Engineer Bead, so Beads blocks it until its parent closes. The runner claims one ready Engineer or Audit Bead and gives it to Codex. The agent uses the `asco` commands to leave status, create child tasks, block on dependencies, escalate to the CEO, and record completion evidence.
+Every engineering task has an Audit child Bead. The Audit Bead is a child of its Engineer Bead, so Beads blocks it until its parent closes. The runner claims one ready Engineer or Audit Bead and gives it to Codex. The agent uses native `bd` commands to leave status, create child tasks, block on dependencies, escalate to the CEO, and record completion evidence.
 
 The runner uses Codex automatic-approval mode inside a dedicated task worktree. It never marks a task complete merely because Codex exits.
 
@@ -22,7 +22,7 @@ bd init --prefix asco
 ## Commands
 
 ```sh
-python3 -m asco.cli submit "Describe the task" "Estimate and break this request into deliverable work."
+bd create "Describe the task" --type engineering --description "Estimate and break this request into deliverable work."
 python3 -m asco.cli run
 python3 -m asco.cli tui
 ```
