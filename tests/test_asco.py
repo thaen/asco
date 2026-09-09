@@ -20,6 +20,17 @@ class AscoTests(unittest.TestCase):
         self.assertEqual(asco.parent_id({"parent": {"id": "bd-1"}}), "bd-1")
         self.assertEqual(asco.parent_id({"parent_id": "bd-2"}), "bd-2")
 
+    def test_beads_issue_type_and_legacy_asco_metadata_are_normalized(self):
+        issue = {"issue_type": "epic", "metadata": {"asco": {"worktree": "/tmp/epic"}}}
+        self.assertEqual(asco.issue_type(issue), "epic")
+        self.assertEqual(asco.metadata(issue)["asco_worktree"], "/tmp/epic")
+
+    def test_legacy_parent_is_not_an_asco_epic(self):
+        runner = asco.Runner("/project", 2)
+        parent = {"id": "bd-1", "issue_type": "engineering"}
+        child = {"id": "bd-2", "parent": "bd-1"}
+        self.assertIsNone(runner.epic_for(child, [parent, child]))
+
     def test_blocking_ids_handles_beads_dependency_records(self):
         self.assertEqual(asco.blocking_ids({"blocked_by": [{"depends_on_id": "bd-1"}, "bd-2"]}), ["bd-1", "bd-2"])
 

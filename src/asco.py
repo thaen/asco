@@ -70,9 +70,20 @@ def issue_id(issue):
     return issue.get("id") or issue.get("issue_id")
 
 
+def issue_type(issue):
+    return issue.get("issue_type") or issue.get("type")
+
+
 def metadata(issue):
     value = issue.get("metadata") or {}
-    return value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        return {}
+    result = dict(value)
+    legacy = value.get("asco")
+    if isinstance(legacy, dict):
+        for key, item in legacy.items():
+            result.setdefault("asco_" + key, item)
+    return result
 
 
 def parent_id(issue):
@@ -186,17 +197,17 @@ class Runner:
     def epic_for(self, issue, issues):
         parent = parent_id(issue)
         by_id = {issue_id(item): item for item in issues}
-        return by_id.get(parent) if parent else None
+        candidate = by_id.get(parent)
+        return candidate if candidate and issue_type(candidate) == "epic" else None
 
     def start(self, issue, issues):
         task = issue_id(issue)
         epic = self.epic_for(issue, issues)
-        if issue.get("type") == "epic":
+        if issue_type(issue) == "epic":
             worktree, branch, log_path = task_paths(self.root, task)
             make_worktree(self.root, worktree, branch, default_branch(self.root))
         else:
             if not epic:
-                self.escalate(task, "Asco cannot dispatch a task without an Epic parent.")
                 return False
             integration = metadata(epic).get("asco_worktree")
             integration_branch = metadata(epic).get("asco_branch")
@@ -228,13 +239,21 @@ class Runner:
         return True
 
     def escalate(self, source, reason):
-        result = self.bd.run("create", "Asco escalation for %s" % source, "--type", "escalation",
+        title = "Asco escalation for %s" % source
+        for issue in self.bd.all():
+            if issue.get("status") == "closed":
+                continue
+            record = metadata(issue)
+            if record.get("asco_source") == source or issue.get("title") == title:
+                return
+        result = self.bd.run("create", title, "--type", "escalation",
                              "--description", reason, "--silent", check=False)
         if result.returncode:
-            result = self.bd.run("create", "Asco escalation for %s" % source, "--type", "task",
+            result = self.bd.run("create", title, "--type", "task",
                                  "--add-label", "escalation", "--description", reason, "--silent")
         escalation = result.stdout.strip()
         self.bd.run("update", escalation, "--status", "blocked")
+        self.bd.update_metadata(escalation, source=source)
         self.bd.comment(source, "Asco escalated: %s" % reason)
 
     def reap(self, issues):
@@ -256,7 +275,7 @@ class Runner:
 
     def integrate(self, issues):
         for issue in issues:
-            if issue.get("status") != "closed" or issue.get("type") == "epic":
+            if issue.get("status") != "closed" or issue_type(issue) == "epic":
                 continue
             record = metadata(issue)
             if record.get("asco_merged") == "true":
@@ -277,7 +296,7 @@ class Runner:
 
     def close_epics(self, issues):
         for epic in issues:
-            if epic.get("type") != "epic" or epic.get("status") != "in_progress":
+            if issue_type(epic) != "epic" or epic.get("status") != "in_progress":
                 continue
             children = [item for item in issues if parent_id(item) == issue_id(epic)]
             if children and all(item.get("status") == "closed" for item in children):
@@ -285,7 +304,7 @@ class Runner:
 
     def cleanup_closed_epics(self, issues):
         for epic in issues:
-            if epic.get("type") != "epic" or epic.get("status") != "closed":
+            if issue_type(epic) != "epic" or epic.get("status") != "closed":
                 continue
             record = metadata(epic)
             if record.get("asco_cleaned") == "true":
@@ -322,7 +341,7 @@ class Runner:
         for issue in self.bd.ready():
             if capacity <= 0:
                 break
-            if issue.get("type") == "epic" or parent_id(issue):
+            if issue_type(issue) == "epic" or self.epic_for(issue, current):
                 if self.start(issue, current):
                     capacity -= 1
 
