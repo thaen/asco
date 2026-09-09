@@ -39,6 +39,77 @@ class SnapshotReader:
         return snapshot
 
 
+class CannedBeadsProject:
+    """An isolated project whose Beads state has deterministic user operations."""
+
+    def __init__(self, test, issues=None):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        self.issues_path = self.root / "issues.json"
+        self.write_issues(issues or [])
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        bead = bin_dir / "bd"
+        bead.write_text("""#!/usr/bin/env python3
+import json
+import os
+import sys
+
+if "--json" in sys.argv:
+    with open(os.environ["ASCO_TEST_ISSUES"], encoding="utf-8") as source:
+        issues = json.load(source)
+    if "ready" in sys.argv:
+        print("[]")
+    elif "blocked" in sys.argv:
+        print(json.dumps([item for item in issues if item.get("blocked_by")]))
+    else:
+        print(json.dumps(issues))
+""", encoding="utf-8")
+        bead.chmod(0o755)
+        self.environment = dict(os.environ)
+        self.environment["ASCO_TEST_ISSUES"] = str(self.issues_path)
+        self.environment["PATH"] = str(bin_dir) + os.pathsep + self.environment["PATH"]
+        test.addCleanup(self.directory.cleanup)
+
+    def issues(self):
+        return json.loads(self.issues_path.read_text(encoding="utf-8"))
+
+    def write_issues(self, issues):
+        self.issues_path.write_text(json.dumps(issues), encoding="utf-8")
+
+    def change(self, issue_id, **values):
+        issues = self.issues()
+        for issue in issues:
+            if issue["id"] == issue_id:
+                issue.update(values)
+                self.write_issues(issues)
+                return
+        raise AssertionError("Unknown canned Beads issue: %s" % issue_id)
+
+    def create(self, issue_id, title):
+        self.write_issues(self.issues() + [{"id": issue_id, "status": "open", "title": title}])
+
+    def claim(self, issue_id):
+        self.change(issue_id, status="in_progress")
+
+    def block(self, issue_id, blocker_id):
+        self.change(issue_id, status="open", blocked_by=[blocker_id])
+
+    def close(self, issue_id):
+        self.change(issue_id, status="closed", closed_at="2026-01-02T00:00:00Z")
+
+    def write_worker_log(self, issue_id, text):
+        log = self.root / ".asco" / "logs" / (issue_id + ".log")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(text, encoding="utf-8")
+        issues = self.issues()
+        for issue in issues:
+            if issue["id"] == issue_id:
+                issue.setdefault("metadata", {})["asco_log"] = str(log.relative_to(self.root))
+        self.write_issues(issues)
+
+
 class AscoTests(unittest.TestCase):
     def setUp(self):
         self.dispatcher_roots = []
@@ -52,33 +123,9 @@ class AscoTests(unittest.TestCase):
                     pass
 
     def make_dispatcher_repository(self, issues=None):
-        directory = tempfile.TemporaryDirectory()
-        root = Path(directory.name)
-        subprocess.run(["git", "init", "-q", str(root)], check=True)
-        bin_dir = root / "bin"
-        bin_dir.mkdir()
-        issues_path = root / "issues.json"
-        issues_path.write_text(json.dumps(issues or []), encoding="utf-8")
-        bead = bin_dir / "bd"
-        bead.write_text("""#!/usr/bin/env python3
-import json
-import os
-import sys
-
-if "--json" in sys.argv:
-    if "ready" in sys.argv:
-        print("[]")
-    else:
-        with open(os.environ["ASCO_TEST_ISSUES"], encoding="utf-8") as source:
-            print(source.read())
-""", encoding="utf-8")
-        bead.chmod(0o755)
-        self.dispatcher_roots.append(root)
-        self.addCleanup(directory.cleanup)
-        environment = dict(os.environ)
-        environment["ASCO_TEST_ISSUES"] = str(issues_path)
-        environment["PATH"] = str(bin_dir) + os.pathsep + environment["PATH"]
-        return root, environment
+        project = CannedBeadsProject(self, issues)
+        self.dispatcher_roots.append(project.root)
+        return project.root, project.environment
 
     def run_dispatcher(self, root, environment, parallel):
         return subprocess.run(
@@ -244,6 +291,112 @@ if "--json" in sys.argv:
         self.assertIn("> bd-1", screen.drawn[1])
         self.assertIn("in_progress", screen.drawn[1])
         self.assertIn("Claimed", screen.drawn[1])
+
+    def test_customer_journey_claim_is_visible_after_refresh(self):
+        project = CannedBeadsProject(self, [
+            {"id": "bd-1", "status": "open", "title": "Investigate checkout failure"},
+        ])
+
+        class ClaimingScreen(ScriptedDashboardScreen):
+            def getch(screen):
+                key = super().getch()
+                if key == ord("r"):
+                    project.claim("bd-1")
+                return key
+
+        screen = ClaimingScreen([ord("r"), ord("q")])
+        with patch.dict(os.environ, project.environment, clear=False):
+            controller = asco.DashboardController(
+                lambda: asco.status_snapshot(project.root),
+                lambda snapshot, show_all, selected: asco.render_dashboard(snapshot, show_all, selected, project.root),
+                asco.render_task_detail, lambda issue: [], asco.render_worker_log, screen,
+            )
+            controller.run()
+
+        self.assertIn("open", screen.drawn[0])
+        self.assertIn("in_progress", screen.drawn[1])
+        self.assertIn("Investigate checkout failure", screen.drawn[1])
+
+    def test_customer_journey_created_and_blocked_work_is_visible_after_refresh(self):
+        project = CannedBeadsProject(self, [
+            {"id": "bd-1", "status": "open", "title": "Release candidate"},
+        ])
+
+        class SubmittingScreen(ScriptedDashboardScreen):
+            def getch(screen):
+                key = super().getch()
+                if key == ord("r"):
+                    project.create("bd-2", "Customer cannot sign in")
+                    project.block("bd-2", "bd-1")
+                return key
+
+        screen = SubmittingScreen([ord("r"), ord("q")])
+        with patch.dict(os.environ, project.environment, clear=False):
+            controller = asco.DashboardController(
+                lambda: asco.status_snapshot(project.root),
+                lambda snapshot, show_all, selected: asco.render_dashboard(snapshot, show_all, selected, project.root),
+                asco.render_task_detail, lambda issue: [], asco.render_worker_log, screen,
+            )
+            controller.run()
+
+        self.assertNotIn("Customer cannot sign in", screen.drawn[0])
+        self.assertIn("Customer cannot sign in", screen.drawn[1])
+        self.assertIn("dependency-blocked", screen.drawn[1])
+        self.assertIn("blocked by bd-1", screen.drawn[1])
+
+    def test_customer_journey_closed_work_appears_when_the_filter_is_enabled(self):
+        project = CannedBeadsProject(self, [
+            {"id": "bd-1", "status": "in_progress", "title": "Publish release notes"},
+        ])
+
+        class ClosingScreen(ScriptedDashboardScreen):
+            def getch(screen):
+                key = super().getch()
+                if key == ord("r"):
+                    project.close("bd-1")
+                return key
+
+        screen = ClosingScreen([ord("r"), ord("c"), ord("q")])
+        with patch.dict(os.environ, project.environment, clear=False):
+            controller = asco.DashboardController(
+                lambda: asco.status_snapshot(project.root),
+                lambda snapshot, show_all, selected: asco.render_dashboard(snapshot, show_all, selected, project.root),
+                asco.render_task_detail, lambda issue: [], asco.render_worker_log, screen,
+            )
+            controller.run()
+
+        self.assertIn("in_progress", screen.drawn[0])
+        self.assertIn("Publish release notes", screen.drawn[1])
+        self.assertIn("Done", screen.drawn[1])
+        self.assertIn("Publish release notes", screen.drawn[2])
+        self.assertIn("Done", screen.drawn[2])
+
+    def test_customer_journey_worker_log_updates_while_the_log_view_is_open(self):
+        project = CannedBeadsProject(self, [
+            {"id": "bd-1", "status": "in_progress", "title": "Repair import"},
+        ])
+        project.write_worker_log("bd-1", "Started repair.\n")
+
+        class LoggingScreen(ScriptedDashboardScreen):
+            def getch(screen):
+                key = super().getch()
+                if key == ord("r"):
+                    project.write_worker_log("bd-1", "Started repair.\nCompleted repair.\n")
+                return key
+
+        screen = LoggingScreen([ord("l"), ord("r"), ord("q")])
+        with patch.dict(os.environ, project.environment, clear=False):
+            controller = asco.DashboardController(
+                lambda: asco.status_snapshot(project.root),
+                lambda snapshot, show_all, selected: asco.render_dashboard(snapshot, show_all, selected, project.root),
+                asco.render_task_detail, lambda issue: asco.worker_log_tail(project.root, issue),
+                asco.render_worker_log, screen,
+            )
+            controller.run()
+
+        self.assertIn("Started repair.", screen.drawn[1])
+        self.assertNotIn("Completed repair.", screen.drawn[1])
+        self.assertIn("Completed repair.", screen.drawn[2])
 
     def test_dashboard_refresh_falls_back_to_the_first_visible_issue(self):
         initial = ([
