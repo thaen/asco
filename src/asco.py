@@ -116,6 +116,15 @@ def blocking_ids(issue):
     return result
 
 
+def dispatcher_processes(root):
+    result = subprocess.run(["ps", "-axo", "pid=,etime=,command="], text=True,
+                            capture_output=True, check=False)
+    marker = str(Path(__file__).resolve())
+    root = str(Path(root).resolve())
+    return [line.strip() for line in result.stdout.splitlines()
+            if marker in line and "_serve" in line and root in line]
+
+
 def default_branch(root):
     remote = command(root, ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], check=False)
     if remote.returncode == 0:
@@ -366,14 +375,16 @@ def visible_issues(root, all_closed=False):
 
 def render_status(root, all_closed=False):
     issues, blocked = visible_issues(root, all_closed)
-    lines = ["ASCO task status", ""]
+    dispatchers = dispatcher_processes(root)
+    dispatcher = "running: " + "; ".join(dispatchers) if dispatchers else "not running"
+    lines = ["ASCO task status", "Dispatcher: " + dispatcher, ""]
     for issue in issues:
         task = issue_id(issue)
         status = "Done" if issue.get("status") == "closed" else issue.get("status", "unknown")
         if task in blocked and issue.get("status") == "open":
             status = "dependency-blocked"
         record = metadata(issue)
-        worker = "pid %s" % record.get("asco_pid") if process_alive(record.get("asco_pid")) else ""
+        worker = "running pid %s" % record.get("asco_pid") if process_alive(record.get("asco_pid")) else ""
         blockers = ", ".join(blocking_ids(blocked.get(task, issue)))
         suffix = " [blocked by %s]" % blockers if blockers else ""
         lines.append("%-16s %-21s %-12s %s%s" % (task, status, worker, issue.get("title", ""), suffix))

@@ -34,9 +34,10 @@ class AscoTests(unittest.TestCase):
     def test_blocking_ids_handles_beads_dependency_records(self):
         self.assertEqual(asco.blocking_ids({"blocked_by": [{"depends_on_id": "bd-1"}, "bd-2"]}), ["bd-1", "bd-2"])
 
+    @patch.object(asco, "dispatcher_processes", return_value=[])
     @patch.object(asco, "visible_issues")
     @patch.object(asco, "process_alive", return_value=False)
-    def test_status_uses_done_and_dependency_blocked(self, alive, visible):
+    def test_status_uses_done_and_dependency_blocked(self, alive, visible, dispatchers):
         visible.return_value = ([
             {"id": "bd-1", "status": "open", "title": "Wait"},
             {"id": "bd-2", "status": "closed", "title": "Finished"},
@@ -44,6 +45,11 @@ class AscoTests(unittest.TestCase):
         report = asco.render_status("/project")
         self.assertIn("dependency-blocked", report)
         self.assertIn("Done", report)
+
+    @patch.object(asco, "dispatcher_processes", return_value=["4144  00:01 python asco.py _serve"])
+    @patch.object(asco, "visible_issues", return_value=([], {}))
+    def test_status_reports_dispatcher_process(self, visible, dispatchers):
+        self.assertIn("Dispatcher: running: 4144", asco.render_status("/project"))
 
     def test_engineer_prompt_names_commit_and_escalation_rules(self):
         prompt = asco.engineer_prompt({"id": "bd-2", "title": "Implement", "description": "Build it"},
