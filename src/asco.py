@@ -74,6 +74,11 @@ def issue_type(issue):
     return issue.get("issue_type") or issue.get("type")
 
 
+def is_escalation(issue):
+    labels = issue.get("labels") or []
+    return issue_type(issue) == "escalation" or "escalation" in labels
+
+
 def metadata(issue):
     value = issue.get("metadata") or {}
     if not isinstance(value, dict):
@@ -352,7 +357,7 @@ class Runner:
         dispatchable = [issue for issue in ready if issue_type(issue) == "epic" or self.epic_for(issue, current)]
         summary = "ready=%s dispatchable=%s active_workers=%s" % (len(ready), len(dispatchable), self.worker_count())
         if summary != self.last_queue_summary:
-            print("asco: " + summary, flush=True)
+            print("%s asco: %s" % (stamp(), summary), flush=True)
             self.last_queue_summary = summary
         for issue in dispatchable:
             if capacity <= 0:
@@ -366,7 +371,7 @@ class Runner:
             try:
                 self.cycle()
             except CommandError as error:
-                print("asco: %s" % error, file=sys.stderr, flush=True)
+                print("%s asco: %s" % (stamp(), error), file=sys.stderr, flush=True)
             time.sleep(POLL_SECONDS)
 
 
@@ -383,8 +388,15 @@ def render_status(root, all_closed=False):
     issues, blocked = visible_issues(root, all_closed)
     dispatchers = dispatcher_processes(root)
     dispatcher = "running: " + "; ".join(dispatchers) if dispatchers else "not running"
-    lines = ["ASCO task status", "Dispatcher: " + dispatcher, "",
-             "Task             Status                Assigned             Worker       Title"]
+    lines = ["ASCO task status", "Dispatcher: " + dispatcher, ""]
+    waiting = [issue for issue in issues if issue.get("status") == "blocked" and is_escalation(issue)]
+    if waiting:
+        lines.extend(["Escalations waiting for you:"])
+        for issue in waiting:
+            lines.append("%s: %s" % (issue_id(issue), issue.get("title", "")))
+            lines.append("  " + issue.get("description", ""))
+        lines.append("")
+    lines.append("Task             Status                Assigned             Worker       Title")
     for issue in issues:
         task = issue_id(issue)
         status = "Done" if issue.get("status") == "closed" else issue.get("status", "unknown")

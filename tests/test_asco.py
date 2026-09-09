@@ -35,6 +35,11 @@ class AscoTests(unittest.TestCase):
     def test_blocking_ids_handles_beads_dependency_records(self):
         self.assertEqual(asco.blocking_ids({"blocked_by": [{"depends_on_id": "bd-1"}, "bd-2"]}), ["bd-1", "bd-2"])
 
+    def test_escalation_detection_uses_type_or_label(self):
+        self.assertTrue(asco.is_escalation({"issue_type": "escalation"}))
+        self.assertTrue(asco.is_escalation({"labels": ["escalation"]}))
+        self.assertFalse(asco.is_escalation({"issue_type": "task"}))
+
     @patch.object(asco, "dispatcher_processes", return_value=[])
     @patch.object(asco, "visible_issues")
     @patch.object(asco, "process_alive", return_value=False)
@@ -53,6 +58,14 @@ class AscoTests(unittest.TestCase):
     @patch.object(asco, "process_alive", return_value=False)
     def test_status_reports_beads_assignment(self, alive, visible, dispatchers):
         self.assertIn("engineer-1", asco.render_status("/project"))
+
+    @patch.object(asco, "dispatcher_processes", return_value=[])
+    @patch.object(asco, "visible_issues", return_value=([{"id": "bd-1", "status": "blocked", "issue_type": "escalation", "title": "Need a choice", "description": "Choose A or B."}], {}))
+    @patch.object(asco, "process_alive", return_value=False)
+    def test_status_places_waiting_escalation_above_task_table(self, alive, visible, dispatchers):
+        report = asco.render_status("/project")
+        self.assertIn("Escalations waiting for you:", report)
+        self.assertIn("Choose A or B.", report)
 
     @patch.object(asco, "dispatcher_processes", return_value=["4144  00:01 python asco.py _serve"])
     @patch.object(asco, "visible_issues", return_value=([], {}))
