@@ -101,7 +101,7 @@ categories. Every child task uses `--parent EPIC_ID`.
 2. Implementation: Implement the feature. The tests should be passing when this task is completed. 
 3. Test: More thoroughly test the feature, especially focused on details, logic, and failure paths. The build should pass when this step is completed.
 4. Audit: Compare the original task that the user submitted (its text is included in this task) and what was implemented. Make sure the build succeeds. Compare the tests to what the user requested. Tests should exist for the features that the user requested. If this step fails, file another task identical to this one, then file blocking correction tasks based on the audit results. The audit task is closed at this point, the output is potentially a separate audit task.
-5. Merge: When finished, an Engineer is tasked with merging the Epic integration branch back to main, building, running tests, and finally deleting the Epic and child worktrees when finished. Only one merge to main can happen at a time.
+5. Merge: When finished, an Engineer is tasked with merging the Epic integration branch back to main, building, and running tests. Asco deletes the Epic and child worktrees after the Epic closes. Only one merge to main can happen at a time.
 
 For a given Epic, child tasks use `blocks` dependencies to express their
 required order. Implementation tasks must not start before their required
