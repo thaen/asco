@@ -10,7 +10,71 @@ asco = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(asco)
 
 
+class ScriptedDashboardScreen:
+    def __init__(self, keys):
+        self.keys = list(keys)
+        self.drawn = []
+
+    def draw(self, status):
+        self.drawn.append(status)
+
+    def getch(self):
+        return self.keys.pop(0)
+
+
+class SnapshotReader:
+    def __init__(self, snapshots):
+        self.snapshots = list(snapshots)
+        self.calls = []
+
+    def __call__(self):
+        snapshot = self.snapshots.pop(0)
+        self.calls.append(snapshot)
+        return snapshot
+
+
 class AscoTests(unittest.TestCase):
+    def run_dashboard(self, keys, snapshots):
+        screen = ScriptedDashboardScreen(keys)
+        reader = SnapshotReader(snapshots)
+        delays = []
+        controller = asco.DashboardController(
+            reader,
+            lambda snapshot, show_all: "%s all_closed=%s" % (snapshot, show_all),
+            screen,
+            lambda: delays.append(None),
+        )
+        controller.run()
+        return screen, reader, delays
+
+    def test_dashboard_quit_reads_a_fresh_snapshot_before_exit(self):
+        screen, reader, delays = self.run_dashboard(
+            [ord("q")], ["initial", "quit refresh"]
+        )
+        self.assertEqual(reader.calls, ["initial", "quit refresh"])
+        self.assertEqual(screen.drawn, ["initial all_closed=False"])
+        self.assertEqual(delays, [])
+
+    def test_dashboard_idle_ticks_keep_the_initial_snapshot(self):
+        screen, reader, delays = self.run_dashboard(
+            [-1, -1, ord("q")], ["initial", "quit refresh"]
+        )
+        self.assertEqual(reader.calls, ["initial", "quit refresh"])
+        self.assertEqual(screen.drawn, ["initial all_closed=False"] * 3)
+        self.assertEqual(delays, [None, None])
+
+    def test_dashboard_closed_toggle_refreshes_and_draws_changed_view(self):
+        screen, reader, delays = self.run_dashboard(
+            [ord("c"), ord("q")],
+            ["recent closed items", "all closed items", "quit refresh"],
+        )
+        self.assertEqual(reader.calls, ["recent closed items", "all closed items", "quit refresh"])
+        self.assertEqual(screen.drawn, [
+            "recent closed items all_closed=False",
+            "all closed items all_closed=True",
+        ])
+        self.assertEqual(delays, [])
+
     def test_task_paths_are_under_common_state_directory(self):
         worktree, branch, log = asco.task_paths("/project", "bd-42", "bd-1")
         self.assertEqual(worktree, Path("/project/.asco/worktrees/tasks/bd-42"))
