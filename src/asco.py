@@ -17,6 +17,7 @@ from pathlib import Path
 
 
 POLL_SECONDS = 3
+DASHBOARD_POLL_SECONDS = 0.25
 METADATA_PREFIX = "asco_"
 DISPATCHER_STOP_SECONDS = 5
 
@@ -768,6 +769,10 @@ class DashboardController:
             key = self.screen.getch()
             if self.source_changed():
                 return True
+            if key == curses.ERR:
+                snapshot = self.snapshot_reader()
+                self.delay()
+                continue
             if key == ord("q"):
                 self.snapshot_reader()
                 return False
@@ -861,7 +866,7 @@ def dashboard(root):
             lambda issue: worker_log_tail(root, issue),
             render_worker_log,
             CursesDashboardScreen(screen, root),
-            lambda: time.sleep(0.25),
+            lambda: time.sleep(DASHBOARD_POLL_SECONDS),
             source_changed,
         )
         return controller.run()

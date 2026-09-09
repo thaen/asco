@@ -36,7 +36,9 @@ The dashboard watches `src/asco.py` while it runs. A source update closes the
 current curses screen and replaces the dashboard process with the updated code,
 so the dashboard returns without a separate terminal restart.
 
-The dashboard selects its first visible task by default. You can use the arrow
+The dashboard polls Beads every quarter second while it is idle. The selected
+task remains selected after a refresh when it is visible, and the first visible
+task becomes selected when the previous task is absent. You can use the arrow
 keys or `j` and `k` to move the selection, `Enter` or `d` to open task details,
 and `l` to open the selected task's worker log. The detail view shows the full
 description and blocker IDs, and `Escape` returns to the preceding view.
