@@ -162,6 +162,12 @@ def make_worktree(root, worktree, branch, base):
     command(root, args)
 
 
+def registered_worktrees(root):
+    result = command(root, ["git", "worktree", "list", "--porcelain"])
+    return {Path(line[len("worktree "):]).resolve()
+            for line in result.stdout.splitlines() if line.startswith("worktree ")}
+
+
 def engineer_prompt(issue, epic, root, worktree, branch, log_path):
     task = issue_id(issue)
     parent = issue_id(epic) if epic else None
@@ -184,7 +190,7 @@ If a decision needs a user answer, first set this task to blocked. Create a bloc
 
 For an Epic decomposition task, create child tasks for high-level tests, implementation, test, audit, and merge as the work requires. Use blocks dependencies in the required order. The merge task must block on every task whose branch it integrates. Include this original request in the audit task. The Epic remains in progress while its children run.
 
-For a merge task, acquire `bd merge-slot acquire` before merging the Epic integration branch into {default_branch(root)}, then build and test. Release the slot in a finally-style cleanup step. Remove task worktrees only after the merge succeeds. Leave the integration worktree for Asco to remove after it closes the Epic.
+For a merge task, acquire `bd merge-slot acquire` before merging the Epic integration branch into {default_branch(root)}, then build and test. Release the slot in a finally-style cleanup step. Do not remove any worktree. Asco removes child and integration worktrees after it closes the Epic.
 
 Worker output is recorded at {log_path.relative_to(root)}. Beads metadata contains this worker's process record.
 """
@@ -197,6 +203,9 @@ class Runner:
         self.bd = Beads(self.root)
         self.workers = {}
         self.last_queue_summary = None
+
+    def log(self, message):
+        print("%s asco: %s" % (stamp(), message), file=sys.stderr, flush=True)
 
     def ensure_escalation_type(self):
         configured = self.bd.run("config", "get", "types.custom", check=False)
@@ -353,18 +362,28 @@ class Runner:
             children = [item for item in issues if parent_id(item) == issue_id(epic)]
             if any(process_alive(metadata(item).get("asco_pid")) for item in children):
                 continue
+            try:
+                registered = registered_worktrees(self.root)
+            except CommandError as error:
+                self.log("could not list worktrees while cleaning %s: %s" % (issue_id(epic), error))
+                continue
             paths = [metadata(item).get("asco_worktree") for item in children]
             paths.append(record.get("asco_worktree"))
+            expected = (self.root / ".asco" / "worktrees").resolve()
             for path in filter(None, paths):
-                path = Path(path)
-                expected = self.root / ".asco" / "worktrees"
+                path = Path(path).resolve()
                 if expected not in path.parents:
-                    self.escalate(issue_id(epic), "Asco refused to remove worktree outside .asco: %s" % path)
+                    self.log("refused to remove out-of-scope worktree for %s: %s" % (issue_id(epic), path))
                     break
+                if path not in registered:
+                    self.log("worktree already removed for %s: %s" % (issue_id(epic), path))
+                    continue
                 result = command(self.root, ["git", "worktree", "remove", str(path)], check=False)
                 if result.returncode:
-                    self.escalate(issue_id(epic), "Asco could not remove closed worktree %s: %s" % (path, result.stderr.strip()))
+                    self.log("could not remove closed worktree for %s: %s: %s" %
+                             (issue_id(epic), path, result.stderr.strip()))
                     break
+                registered.remove(path)
             else:
                 self.bd.update_metadata(issue_id(epic), cleaned="true", cleaned_at=stamp())
 

@@ -81,6 +81,17 @@ class AscoTests(unittest.TestCase):
         self.assertEqual(branch, "asco/task-bd-42")
         self.assertEqual(log, Path("/project/.asco/logs/bd-42.log"))
 
+    def test_registered_worktrees_parses_git_porcelain(self):
+        class Result:
+            returncode = 0
+            stdout = "worktree /project\nHEAD abc\n\nworktree /project/.asco/worktrees/tasks/bd-1\nHEAD def\n"
+        with patch.object(asco, "command", return_value=Result()):
+            paths = asco.registered_worktrees("/project")
+        self.assertEqual(paths, {
+            Path("/project").resolve(),
+            Path("/project/.asco/worktrees/tasks/bd-1").resolve(),
+        })
+
     def test_parent_id_handles_beads_shapes(self):
         self.assertEqual(asco.parent_id({"parent": {"id": "bd-1"}}), "bd-1")
         self.assertEqual(asco.parent_id({"parent_id": "bd-2"}), "bd-2")
@@ -208,6 +219,54 @@ class AscoTests(unittest.TestCase):
         runner.bd.run = run
         runner.clear_exit_metadata("bd-1")
         self.assertIn(("update", "bd-1", "--unset-metadata", "asco_exited_at", "--unset-metadata", "asco_exit_state", "--unset-metadata", "asco_exit_code"), calls)
+
+    def cleanup_runner(self, worktree):
+        runner = asco.Runner("/project", 2)
+        class FakeBeads:
+            def __init__(self):
+                self.metadata = []
+            def update_metadata(self, *args, **kwargs):
+                self.metadata.append((args, kwargs))
+        runner.bd = FakeBeads()
+        issues = [
+            {"id": "bd-1", "issue_type": "epic", "status": "closed",
+             "metadata": {"asco_worktree": "/project/.asco/worktrees/epics/bd-1"}},
+            {"id": "bd-2", "issue_type": "task", "parent": "bd-1", "status": "closed",
+             "metadata": {"asco_worktree": str(worktree)}},
+        ]
+        return runner, issues
+
+    @patch.object(asco, "process_alive", return_value=False)
+    def test_cleanup_marks_an_already_removed_worktree_clean(self, alive):
+        runner, issues = self.cleanup_runner("/project/.asco/worktrees/tasks/bd-2")
+        with patch.object(asco, "registered_worktrees", return_value=set()), \
+             patch.object(asco, "command") as command_call:
+            runner.cleanup_closed_epics(issues)
+        command_call.assert_not_called()
+        self.assertEqual(runner.bd.metadata[0][0], ("bd-1",))
+        self.assertEqual(runner.bd.metadata[0][1]["cleaned"], "true")
+
+    @patch.object(asco, "process_alive", return_value=False)
+    def test_cleanup_removes_a_registered_worktree(self, alive):
+        path = Path("/project/.asco/worktrees/tasks/bd-2").resolve()
+        runner, issues = self.cleanup_runner(path)
+        class Result:
+            returncode = 0
+            stderr = ""
+        with patch.object(asco, "registered_worktrees", return_value={path}), \
+             patch.object(asco, "command", return_value=Result()) as command_call:
+            runner.cleanup_closed_epics(issues)
+        command_call.assert_called_once_with(runner.root, ["git", "worktree", "remove", str(path)], check=False)
+        self.assertEqual(runner.bd.metadata[0][1]["cleaned"], "true")
+
+    @patch.object(asco, "process_alive", return_value=False)
+    def test_cleanup_refuses_an_out_of_scope_worktree(self, alive):
+        runner, issues = self.cleanup_runner("/outside/bd-2")
+        with patch.object(asco, "registered_worktrees", return_value={Path("/outside/bd-2")}), \
+             patch.object(asco, "command") as command_call:
+            runner.cleanup_closed_epics(issues)
+        command_call.assert_not_called()
+        self.assertEqual(runner.bd.metadata, [])
 
 
 if __name__ == "__main__":
