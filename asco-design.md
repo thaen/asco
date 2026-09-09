@@ -74,6 +74,11 @@ selected task remains selected when it is visible in the fresh snapshot. When
 it is absent, the dashboard selects the first visible task, or no task when no
 tasks are visible.
 
+When a Beads snapshot read fails, the dashboard stays open. It retains and
+draws the last successful snapshot with the command error and retries on the
+next poll. A failed initial read draws an empty snapshot with the same error,
+so that a temporary Beads failure does not close the terminal interface.
+
 The `c` key toggles the closed-item view and obtains a fresh Beads snapshot
 before it draws the new view. The `q` key obtains a fresh Beads snapshot before
 the dashboard exits. These operation-triggered reads are synchronous, so a key
