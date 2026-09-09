@@ -384,6 +384,41 @@ if "--json" in sys.argv:
         self.assertIn("asco_needs_input=true", runner.bd.calls[0])
         self.assertIn("More than one safe repair exists.", runner.bd.calls[1][2])
 
+    def test_runner_repairs_a_cycle_before_starting_an_unrelated_ready_task(self):
+        events = []
+
+        class FakeBeads:
+            def all(self):
+                return issues
+
+            def ready(self):
+                return [ready_task]
+
+            def run(self, *args, **kwargs):
+                events.append(("repair", args))
+
+        issues = [
+            {"id": "parent", "status": "open", "dependencies": [
+                {"id": "child", "dependency_type": "blocks"},
+            ]},
+            {"id": "child", "status": "open", "dependencies": [
+                {"id": "parent", "dependency_type": "parent-child"},
+            ]},
+        ]
+        ready_task = {"id": "unrelated", "status": "open", "issue_type": "task"}
+        issues.append(ready_task)
+        runner = asco.Runner("/project", 1)
+        runner.bd = FakeBeads()
+        runner.reap = lambda current: None
+        runner.cleanup_closed_tasks = lambda current: None
+        runner.start = lambda issue, current: events.append(("start", asco.issue_id(issue))) or True
+
+        runner.cycle()
+
+        self.assertEqual(events[0][0], "repair")
+        self.assertEqual(events[0][1][:2], ("create", "Repair Beads dependency cycle: child, parent"))
+        self.assertEqual(events[1:], [("start", "unrelated")])
+
     def test_escalation_detection_uses_type_or_label(self):
         self.assertTrue(asco.is_escalation({"issue_type": "escalation"}))
         self.assertTrue(asco.is_escalation({"labels": ["escalation"]}))
