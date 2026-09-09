@@ -67,10 +67,12 @@ closed tasks.
 
 ### Dashboard refresh boundaries
 
-The dashboard has one cached Beads snapshot while it is idle. Its periodic
-draw loop may repaint that snapshot and the dispatcher log, but it does not
-read Beads again. Data can therefore be stale until the user begins an
-operation.
+The dashboard reads a fresh Beads snapshot on every idle poll. Its periodic
+draw loop therefore redraws the active task table, detail view, or worker-log
+view from current task data, while it also redraws the dispatcher log. The
+selected task remains selected when it is visible in the fresh snapshot. When
+it is absent, the dashboard selects the first visible task, or no task when no
+tasks are visible.
 
 The `c` key toggles the closed-item view and obtains a fresh Beads snapshot
 before it draws the new view. The `q` key obtains a fresh Beads snapshot before
@@ -81,10 +83,11 @@ refresh requirement applies specifically to `q` and `c`.
 The dashboard code has a controller seam that accepts a snapshot reader, a
 renderer, a screen input/output adapter, and a delay or clock. A scripted fake
 screen can provide keys and record draws, and a sequential fake reader can
-provide snapshots and record reads. Tests must prove one initial read, no
-additional reads during idle ticks, one fresh read for each `c`, the resulting
-closed-item output, and one fresh read before `q` exits. The tests must not
-need a terminal, real sleeps, or a Beads database.
+provide snapshots and record reads. Tests must prove one initial read, one
+fresh read for each idle tick and `c`, the resulting closed-item output, and
+one fresh read before `q` exits. A canned isolated Beads project proves that a
+state transition appears without a navigation key. The tests must not need a
+terminal or real sleeps.
 
 The dashboard also watches its `src/asco.py` source file while it polls for
 input. A changed file returns from the curses wrapper, which restores the

@@ -200,13 +200,75 @@ if "--json" in sys.argv:
         self.assertEqual(screen.drawn, ["([{'id': 'initial', 'status': 'open', 'title': 'initial'}], {}) all_closed=False selected=initial"])
         self.assertEqual(delays, [])
 
-    def test_dashboard_idle_ticks_keep_the_initial_snapshot(self):
+    def test_dashboard_idle_ticks_refresh_the_snapshot_without_navigation(self):
         screen, reader, delays = self.run_dashboard(
-            [-1, -1, ord("q")], [self.dashboard_snapshot("initial"), self.dashboard_snapshot("quit refresh")]
+            [-1, -1, ord("q")], [
+                self.dashboard_snapshot("initial"),
+                self.dashboard_snapshot("claimed"),
+                self.dashboard_snapshot("closed"),
+                self.dashboard_snapshot("quit refresh"),
+            ]
         )
-        self.assertEqual(reader.calls, [self.dashboard_snapshot("initial"), self.dashboard_snapshot("quit refresh")])
-        self.assertEqual(screen.drawn, ["([{'id': 'initial', 'status': 'open', 'title': 'initial'}], {}) all_closed=False selected=initial"] * 3)
+        self.assertEqual(reader.calls, [
+            self.dashboard_snapshot("initial"),
+            self.dashboard_snapshot("claimed"),
+            self.dashboard_snapshot("closed"),
+            self.dashboard_snapshot("quit refresh"),
+        ])
+        self.assertEqual(screen.drawn, [
+            "([{'id': 'initial', 'status': 'open', 'title': 'initial'}], {}) all_closed=False selected=initial",
+            "([{'id': 'claimed', 'status': 'open', 'title': 'claimed'}], {}) all_closed=False selected=claimed",
+            "([{'id': 'closed', 'status': 'open', 'title': 'closed'}], {}) all_closed=False selected=closed",
+        ])
         self.assertEqual(delays, [None, None])
+
+    def test_dashboard_idle_refresh_reads_a_canned_beads_project(self):
+        root, environment = self.make_dispatcher_repository([
+            {"id": "bd-1", "status": "open", "title": "Waiting"},
+        ])
+        issues_path = root / "issues.json"
+
+        def transition():
+            issues_path.write_text(json.dumps([
+                {"id": "bd-1", "status": "in_progress", "title": "Claimed"},
+            ]), encoding="utf-8")
+
+        class TransitionScreen(ScriptedDashboardScreen):
+            def getch(self):
+                key = super().getch()
+                if key == asco.curses.ERR:
+                    transition()
+                return key
+
+        screen = TransitionScreen([asco.curses.ERR, ord("q")])
+        with patch.dict(os.environ, environment, clear=False):
+            controller = asco.DashboardController(
+                lambda: asco.status_snapshot(root),
+                lambda snapshot, show_all, selected: asco.render_dashboard(snapshot, show_all, selected, root),
+                asco.render_task_detail,
+                lambda issue: [],
+                asco.render_worker_log,
+                screen,
+                lambda: None,
+            )
+            controller.run()
+
+        self.assertIn("> bd-1", screen.drawn[0])
+        self.assertIn("Waiting", screen.drawn[0])
+        self.assertIn("> bd-1", screen.drawn[1])
+        self.assertIn("in_progress", screen.drawn[1])
+        self.assertIn("Claimed", screen.drawn[1])
+
+    def test_dashboard_idle_refresh_falls_back_to_the_first_visible_issue(self):
+        initial = ([
+            {"id": "bd-1", "status": "open", "title": "First"},
+            {"id": "bd-2", "status": "open", "title": "Second"},
+        ], {})
+        refreshed = ([{"id": "bd-1", "status": "open", "title": "First"}], {})
+        screen, reader, delays = self.run_dashboard([ord("j"), asco.curses.ERR, ord("q")], [initial, refreshed, "quit refresh"])
+        self.assertEqual(reader.calls, [initial, refreshed, "quit refresh"])
+        self.assertEqual(screen.drawn[-1], "%s all_closed=False selected=bd-1" % (refreshed,))
+        self.assertEqual(delays, [None])
 
     def test_dashboard_closed_toggle_refreshes_and_draws_changed_view(self):
         screen, reader, delays = self.run_dashboard(
