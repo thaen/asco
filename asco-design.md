@@ -10,7 +10,10 @@ The Engineer must raise a question only when a choice would change user-visible 
 
 ## Usage: Task submission
 
-Start `asco` in a directory of your choice. `asco run` is nonblocking:
+Version one manages one Git repository. Start `asco` at that repository's root;
+`asco` uses its Beads database and default branch. The `all-projects` directory
+in this example is one repository, not a collection of repositories. `asco run`
+is nonblocking:
 
 ```
 mkdir all-projects
@@ -25,15 +28,26 @@ cd all-projects
 bd create "Title" --type epic --description "Read file X and do what it says, or other detailed task description."
 ```
 
-`asco` polls the ready queue and starts agents using `codex -p` with instructions to work on specific tasks, using the coordinator patterns from the Beads coordination document linked above.. It starts new tasks until there are X running tasks, then waits for one to finish before starting the next one.
+`asco` polls the ready queue and starts agents using `codex exec` with instructions to work on specific tasks, using the coordinator patterns from the Beads coordination document linked above.. It starts new tasks until there are X running tasks, then waits for one to finish before starting the next one.
 
-Spawned agents have their own worktrees. 
+When Asco claims an Epic, it creates an Epic integration branch and worktree
+from the default branch. Spawned agents have their own child worktrees and
+branches based on that Epic integration branch. A child task that changes the
+repository commits its work before it closes. Asco merges that work into the
+Epic integration branch before it starts a dependent child task. Only one
+Engineer updates a given Epic integration branch at a time.
 
-When spawned, Beads is updated with metadata about the Engineer that is working on the task. For instance, its pid (via `--set-metadata pid=12345`). 
+When spawned, Beads is updated with metadata about the Engineer that is working on the task. The metadata is the durable process record: it has the Engineer identity, PID, start time, worker branch, worktree location, log location, and eventual exit status (for example, `--set-metadata pid=12345`). Asco writes worker standard output and standard error to `.asco/logs/<bead-id>.log` at the repository root. The log path stored in metadata is relative to that root.
 
 ## Usage: Status reporting
 
-A UI allows a user to view the state of all beads tasks and their status. The built-in statuses are open, in_progress, blocked, deferred, closed, pinned, and hooked. Blocked tasks have their blocking task IDs shown. The UI shows the most recent 10 Done tasks with an option to view All tasks in that state.
+A UI allows a user to view the state of all Beads tasks and their status. The
+built-in stored statuses are open, in_progress, blocked, deferred, closed,
+pinned, and hooked. The UI shows dependency availability separately: an open
+task with unresolved `blocks` dependencies is dependency-blocked, and its
+blocking task IDs are shown. The UI calls tasks with stored status `closed`
+Done, shows the most recently closed 10 first, and has an option to view all
+closed tasks.
 
 It can be a Terminal UI built with Python, tested with Pyte and Pexpect, or it can be a WebUI with no back-end (TamperMonkey is OK if needed). The initial Engineer is empowered to make the implementation decision based on which UI is easier and faster to test, which I suspect is a Terminal UI.
 
@@ -65,14 +79,18 @@ categories. Every child task uses `--parent EPIC_ID`.
 1. High-level tests: Write a reasonable number of end-to-end tests for the requested feature. They should be failing when this task is completed.
 2. Implementation: Implement the feature. The tests should be passing when this task is completed. 
 3. Test: More thoroughly test the feature, especially focused on details, logic, and failure paths. The build should pass when this step is completed.
-4. Audit: Compare the original task that the user submitted (its text is included in this task) and what was implemented. Make sure the build succeeds. Compare the tests to what the user requested. Tests should exist for the features that the user requested. If this step fails, file another task identical to this one, then file blocking correction tasks based on the audit results.
-5. Merge: When finished, an Engineer is tasked with merging the worktree back to main, building, running tests, and finally deleting the worktree when finished. Only one merge can happen at a time.
+4. Audit: Compare the original task that the user submitted (its text is included in this task) and what was implemented. Make sure the build succeeds. Compare the tests to what the user requested. Tests should exist for the features that the user requested. If this step fails, file another task identical to this one, then file blocking correction tasks based on the audit results. The audit task is closed at this point, the output is potentially a separate audit task.
+5. Merge: When finished, an Engineer is tasked with merging the Epic integration branch back to main, building, running tests, and finally deleting the Epic and child worktrees when finished. Only one merge to main can happen at a time.
 
 For a given Epic, child tasks use `blocks` dependencies to express their
 required order. Implementation tasks must not start before their required
 high-level test tasks have closed. Test tasks must not start before their
 required implementation tasks have closed. The Merge task must wait for every
 task whose work it integrates.
+
+## SDLC: Child tasks
+
+Child tasks are worked like typical engineering tasks: Optional but encouraged red/green TDD: test, Implement, repeat; then audit and merge the committed work back to the Epic integration branch. Ideally each of these is worked by a different Engineer and comments are added as they go. I want the "Audit" step to be the same as above, but doing this recursively forever is silly of course, not totally sure how to handle that yet, but let's try it first to see how it goes.
 
 Child tasks do not block their Epic. The `parent-child` relationship keeps the
 work grouped under the Epic, and Beads prevents the Epic from closing while it
@@ -91,6 +109,8 @@ with any required `blocks` dependencies. An independent follow-up task uses a
 `discovered-from` dependency. A large independent effort may be created as a
 new Epic and follows the same lifecycle.
 
-## Engineer communication
+## Engineer communication and escalation
 
 Engineers communicate between tasks by using comments on tasks and referencing task IDs when needed. For instance, when decomposing the original user-requested task, the Engineer may file the tasks in reverse order, so that it can add instructions "leave comments on the next tickets as you learn important things".
+
+To escalate, workers file tasks of type "escalation" that are blocked or waiting. Users are instructed in the UI on how to write down answers to these escalated questions. Any method is fine, even asking the user to run "bd" commands. We can choose at implementation time, it's not that important.
