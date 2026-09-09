@@ -2,7 +2,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 
 SPEC = importlib.util.spec_from_file_location("asco", Path(__file__).parents[1] / "src" / "asco.py")
@@ -307,6 +307,77 @@ class AscoTests(unittest.TestCase):
     @patch.object(asco, "dispatcher_processes", return_value=["4144  00:01 python asco.py _serve"])
     def test_status_reports_dispatcher_process(self, dispatchers):
         self.assertIn("Dispatcher: running: 4144", asco.render_status(([], {}), root="/project"))
+
+    def test_repeated_dispatcher_requests_at_the_same_limit_keep_the_existing_process(self):
+        process = "4144  00:01 python asco.py --root /project _serve --parallel 2"
+        lock = object()
+        with patch.object(asco, "acquire_dispatcher_lock", return_value=lock), \
+             patch.object(asco, "release_dispatcher_lock") as release, \
+             patch.object(asco, "dispatcher_processes", return_value=[process]) as dispatchers, \
+             patch.object(asco, "stop_dispatchers") as stop, \
+             patch.object(asco, "start_dispatcher") as start:
+            first = asco.ensure_dispatcher("/project", 2)
+            second = asco.ensure_dispatcher("/project", 2)
+
+        self.assertEqual(first, (4144, False))
+        self.assertEqual(second, (4144, False))
+        self.assertEqual(dispatchers.call_count, 2)
+        stop.assert_not_called()
+        start.assert_not_called()
+        self.assertEqual(release.call_args_list, [call(lock), call(lock)])
+
+    def test_changed_dispatcher_limit_stops_only_dispatchers_before_replacement(self):
+        dispatcher = "4144  00:01 python asco.py --root /project _serve --parallel 2"
+        engineer_pid = 7331
+
+        class Replacement:
+            pid = 5151
+
+        lock = object()
+        with patch.object(asco, "acquire_dispatcher_lock", return_value=lock), \
+             patch.object(asco, "release_dispatcher_lock"), \
+             patch.object(asco, "dispatcher_processes", return_value=[dispatcher]), \
+             patch.object(asco.os, "kill") as kill, \
+             patch.object(asco, "process_alive", return_value=False), \
+             patch.object(asco, "start_dispatcher", return_value=Replacement()) as start:
+            pid, replaced = asco.ensure_dispatcher("/project", 1)
+
+        self.assertEqual((pid, replaced), (5151, True))
+        self.assertEqual(kill.call_args_list, [call(4144, asco.signal.SIGTERM)])
+        self.assertNotIn(call(engineer_pid, asco.signal.SIGTERM), kill.call_args_list)
+        start.assert_called_once_with("/project", 1)
+
+    def test_replacement_recovers_active_worker_count_from_live_beads_metadata(self):
+        class FakeBeads:
+            def all(self):
+                return [{"id": "asco-active", "status": "in_progress",
+                         "metadata": {"asco_pid": "7331"}}]
+
+        replacement = asco.Runner("/project", 1)
+        replacement.bd = FakeBeads()
+        with patch.object(asco, "process_alive", side_effect=lambda pid: int(pid) == 7331):
+            self.assertEqual(replacement.worker_count(), 1)
+
+        self.assertEqual(replacement.workers, {})
+
+    def test_reduced_limit_does_not_admit_work_when_recovered_workers_fill_it(self):
+        active = {"id": "asco-active", "status": "in_progress", "metadata": {"asco_pid": "7331"}}
+
+        class FakeBeads:
+            def all(self):
+                return [active]
+
+            def ready(self):
+                raise AssertionError("The dispatcher must not query for admissions when it is saturated.")
+
+        replacement = asco.Runner("/project", 1)
+        replacement.bd = FakeBeads()
+        with patch.object(asco, "process_alive", return_value=True), \
+             patch.object(asco, "registered_worktrees", return_value=set()), \
+             patch.object(replacement, "start") as start:
+            replacement.cycle()
+
+        start.assert_not_called()
 
     def test_log_tail_reads_the_most_recent_lines(self):
         with tempfile.TemporaryDirectory() as root:
