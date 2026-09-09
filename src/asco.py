@@ -3,8 +3,10 @@
 
 import argparse
 import curses
+import fcntl
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -16,6 +18,7 @@ from pathlib import Path
 
 POLL_SECONDS = 3
 METADATA_PREFIX = "asco_"
+DISPATCHER_STOP_SECONDS = 5
 
 
 class CommandError(RuntimeError):
@@ -234,6 +237,99 @@ def dispatcher_processes(root):
     root = str(Path(root).resolve())
     return [line.strip() for line in result.stdout.splitlines()
             if marker in line and "_serve" in line and root in line]
+
+
+def dispatcher_pid(process):
+    """Return the PID that begins a ``ps`` dispatcher record, if present."""
+    try:
+        return int(process.split(None, 1)[0])
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def dispatcher_parallel(process):
+    """Return the requested parallel limit from a dispatcher command line."""
+    match = re.search(r"(?:^|\s)--parallel(?:\s+|=)(\d+)(?:\s|$)", process)
+    return int(match.group(1)) if match else None
+
+
+def dispatcher_lock_path(root, name):
+    return Path(root).resolve() / ".asco" / (name + ".lock")
+
+
+def acquire_dispatcher_lock(root, name, nonblocking=False):
+    """Acquire a process lock that is released when its owner exits."""
+    path = dispatcher_lock_path(root, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = open(path, "a", encoding="utf-8")
+    operation = fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0)
+    try:
+        fcntl.flock(lock.fileno(), operation)
+    except BlockingIOError:
+        lock.close()
+        return None
+    return lock
+
+
+def release_dispatcher_lock(lock):
+    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    lock.close()
+
+
+def stop_dispatchers(processes):
+    """Ask the listed dispatchers to exit, and return PIDs that remain alive."""
+    pids = sorted({pid for pid in (dispatcher_pid(process) for process in processes) if pid})
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError as error:
+            raise CommandError("could not stop dispatcher PID %s: %s" % (pid, error))
+    deadline = time.monotonic() + DISPATCHER_STOP_SECONDS
+    remaining = pids
+    while remaining and time.monotonic() < deadline:
+        remaining = [pid for pid in remaining if process_alive(pid)]
+        if remaining:
+            time.sleep(0.05)
+    return remaining
+
+
+def start_dispatcher(root, parallel):
+    """Start one detached dispatcher and return its process."""
+    log_dir = Path(root) / ".asco" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log = open(log_dir / "runner.log", "a", encoding="utf-8")
+    try:
+        return subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "--root", str(root), "_serve",
+             "--parallel", str(parallel)],
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+        )
+    finally:
+        log.close()
+
+
+def ensure_dispatcher(root, parallel):
+    """Leave exactly one dispatcher for ``root`` at the requested limit.
+
+    The command lock serializes discovery and replacement. The serving process
+    has a second lock, so a stale or concurrent launcher cannot become another
+    active dispatcher.
+    """
+    command_lock = acquire_dispatcher_lock(root, "dispatcher-command")
+    try:
+        processes = dispatcher_processes(root)
+        if len(processes) == 1 and dispatcher_parallel(processes[0]) == parallel:
+            return dispatcher_pid(processes[0]), False
+        if processes:
+            remaining = stop_dispatchers(processes)
+            if remaining:
+                raise CommandError("dispatcher did not stop: %s" % ", ".join(map(str, remaining)))
+        worker = start_dispatcher(root, parallel)
+        return worker.pid, True
+    finally:
+        release_dispatcher_lock(command_lock)
 
 
 def default_branch(root):
@@ -490,12 +586,19 @@ class Runner:
                 capacity -= 1
 
     def serve(self):
-        while True:
-            try:
-                self.cycle()
-            except CommandError as error:
-                print("%s asco: %s" % (stamp(), error), file=sys.stderr, flush=True)
-            time.sleep(POLL_SECONDS)
+        lock = acquire_dispatcher_lock(self.root, "dispatcher", nonblocking=True)
+        if lock is None:
+            self.log("another dispatcher already serves this repository; exiting")
+            return
+        try:
+            while True:
+                try:
+                    self.cycle()
+                except CommandError as error:
+                    print("%s asco: %s" % (stamp(), error), file=sys.stderr, flush=True)
+                time.sleep(POLL_SECONDS)
+        finally:
+            release_dispatcher_lock(lock)
 
 
 def status_snapshot(root):
@@ -783,11 +886,11 @@ def main(argv=None):
         if args.parallel < 1:
             parser.error("--parallel must be at least one")
         Beads(root).run("info")
-        log_dir = root / ".asco" / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log = open(log_dir / "runner.log", "a", encoding="utf-8")
-        worker = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--root", str(root), "_serve", "--parallel", str(args.parallel)], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        print("Asco dispatcher started with PID %s." % worker.pid)
+        pid, replaced = ensure_dispatcher(root, args.parallel)
+        if replaced:
+            print("Asco dispatcher started with PID %s and parallel limit %s." % (pid, args.parallel))
+        else:
+            print("Asco dispatcher PID %s already has parallel limit %s." % (pid, args.parallel))
     elif args.command == "_serve":
         Runner(root, args.parallel).serve()
     elif args.command == "status":
