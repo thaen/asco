@@ -91,6 +91,10 @@ def metadata(issue):
     return result
 
 
+def metadata_true(record, key):
+    return record.get(key) is True or record.get(key) == "true"
+
+
 def parent_id(issue):
     parent = issue.get("parent") or issue.get("parent_id")
     if isinstance(parent, dict):
@@ -293,7 +297,7 @@ class Runner:
             if issue.get("status") != "closed" or issue_type(issue) == "epic":
                 continue
             record = metadata(issue)
-            if record.get("asco_merged") == "true":
+            if metadata_true(record, "asco_merged"):
                 continue
             epic = self.epic_for(issue, issues)
             if not epic:
@@ -322,7 +326,7 @@ class Runner:
             if issue_type(epic) != "epic" or epic.get("status") != "closed":
                 continue
             record = metadata(epic)
-            if record.get("asco_cleaned") == "true":
+            if metadata_true(record, "asco_cleaned"):
                 continue
             children = [item for item in issues if parent_id(item) == issue_id(epic)]
             if any(process_alive(metadata(item).get("asco_pid")) for item in children):

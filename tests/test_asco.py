@@ -26,6 +26,11 @@ class AscoTests(unittest.TestCase):
         self.assertEqual(asco.issue_type(issue), "epic")
         self.assertEqual(asco.metadata(issue)["asco_worktree"], "/tmp/epic")
 
+    def test_metadata_true_handles_beads_boolean_and_string_values(self):
+        self.assertTrue(asco.metadata_true({"asco_merged": True}, "asco_merged"))
+        self.assertTrue(asco.metadata_true({"asco_merged": "true"}, "asco_merged"))
+        self.assertFalse(asco.metadata_true({"asco_merged": False}, "asco_merged"))
+
     def test_legacy_parent_is_not_an_asco_epic(self):
         runner = asco.Runner("/project", 2)
         parent = {"id": "bd-1", "issue_type": "engineering"}
