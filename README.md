@@ -1,6 +1,6 @@
 # Asco
 
-Asco is a local dispatcher for Beads tasks in one Git repository. It claims open Epics and ready child tasks, gives each task an isolated Git worktree, and starts an Engineer through `codex exec`.
+Asco is a local dispatcher for Beads tasks in one Git repository. It claims ready work tasks of any ordinary Beads type, gives each task an isolated Git worktree, and starts an Engineer through `codex exec`.
 
 Run the dispatcher from the repository that has the Beads database.
 
@@ -17,6 +17,8 @@ Use the status view for a plain terminal report or the dashboard for a refreshin
 ./asco dashboard
 ./asco answer ASCO-42 "Use the first option because it preserves the API."
 ```
+
+The editable worker frameworks are `prompts/engineer.md` and `prompts/audit.md`. Set `asco_prompt=audit` on an ordinary task to append the Audit framework to its Engineer prompt. Label an ordinary task `asco:integration` when its Engineer must merge named work branches into the default branch; Asco runs one Integration task at a time.
 
 The dispatcher needs an initialized Beads database, Git worktree support, and an authenticated Codex CLI. The test suite uses only the Python standard library.
 

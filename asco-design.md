@@ -25,17 +25,16 @@ Users submit tasks by creating beads in the "ready" state in a specific director
 
 ```
 cd all-projects
-bd create "Title" --type epic --description "Read file X and do what it says, or other detailed task description."
+bd create "Title" --type task --description "Read file X and do what it says, or other detailed task description."
 ```
 
 `asco` polls the ready queue and starts agents using `codex exec` with instructions to work on specific tasks, using the coordinator patterns from the Beads coordination document linked above.. It starts new tasks until there are X running tasks, then waits for one to finish before starting the next one.
 
-When Asco claims an Epic, it creates an Epic integration branch and worktree
-from the default branch. Spawned agents have their own child worktrees and
-branches based on that Epic integration branch. A child task that changes the
-repository commits its work before it closes. Asco merges that work into the
-Epic integration branch before it starts a dependent child task. Only one
-Engineer updates a given Epic integration branch at a time.
+Every ready ordinary Beads task is Engineer work, regardless of whether its type is `task`,
+`bug`, `feature`, `chore`, or `epic`. Asco gives each task a branch and worktree based on the
+default branch. Engineers commit their work before closing a task. An Engineer creates a normal
+Integration task when a branch must be merged into the default branch; Asco runs one task labelled
+`asco:integration` at a time, and that task's Engineer performs the merge and validation.
 
 When spawned, Beads is updated with metadata about the Engineer that is working on the task. The metadata is the durable process record: it has the Engineer identity, PID, start time, worker branch, worktree location, log location, and eventual exit status (for example, `--set-metadata pid=12345`). Asco writes worker standard output and standard error to `.asco/logs/<bead-id>.log` at the repository root. The log path stored in metadata is relative to that root.
 
@@ -84,56 +83,34 @@ To start with, there is only one persona: "Engineer". The Engineer is an expert 
 
 The Engineer understands that they do not work alone. They escalate important decisions. They delegate tasks to other Engineers, such as test authoring, investigation and research, and more. They share their findings in the company Wiki. 
 
-## Worker prompting: SDLC
+## Worker prompting: Task framework
 
-Users submit Epics by creating Beads with type `epic`. Epics are considered to
-be software engineering work.
+`prompts/engineer.md` is the default, editable Engineer framework. It tells an Engineer to judge
+scope, complete small tasks directly, and divide nontrivial work into focused Beads tasks when
+separate Engineers can make progress. Parent relations group work; `blocks` dependencies express
+order. A task that waits for children remains open and dependency-blocked until Beads makes it
+ready again.
 
-When Asco claims an Epic, it starts an Engineer to break down the work. The
-Epic becomes `in_progress` when it is claimed and remains `in_progress` while
-its child tasks execute. An in-progress Epic represents work that is underway,
-even when no Engineer is currently decomposing it.
+`prompts/audit.md` is an editable Audit framework selected by task metadata
+`asco_prompt=audit`. An Audit task is ordinary Engineer work. It compares the original request,
+delivered merge, implementation, and tests. A passing audit closes with a conclusion. An audit
+that finds gaps files correction tasks and a successor Audit task that blocks on those corrections,
+then closes with its findings. The successor repeats the audit after correction work closes.
 
-The Engineer creates as many child tasks as the work requires in these
-categories. Every child task uses `--parent EPIC_ID`.
-
-1. High-level tests: Write a reasonable number of end-to-end tests for the requested feature. They should be failing when this task is completed.
-2. Implementation: Implement the feature. The tests should be passing when this task is completed. 
-3. Test: More thoroughly test the feature, especially focused on details, logic, and failure paths. The build should pass when this step is completed.
-4. Audit: Compare the original task that the user submitted (its text is included in this task) and what was implemented. Make sure the build succeeds. Compare the tests to what the user requested. Tests should exist for the features that the user requested. If this step fails, file another task identical to this one, then file blocking correction tasks based on the audit results. The audit task is closed at this point, the output is potentially a separate audit task.
-5. Merge: When finished, an Engineer is tasked with merging the Epic integration branch back to main, building, and running tests. Asco deletes the Epic and child worktrees after the Epic closes. Only one merge to main can happen at a time.
-
-For a given Epic, child tasks use `blocks` dependencies to express their
-required order. Implementation tasks must not start before their required
-high-level test tasks have closed. Test tasks must not start before their
-required implementation tasks have closed. The Merge task must wait for every
-task whose work it integrates.
-
-## SDLC: Child tasks
-
-Child tasks are worked like typical engineering tasks: Optional but encouraged red/green TDD: test, Implement, repeat; then audit and merge the committed work back to the Epic integration branch. Ideally each of these is worked by a different Engineer and comments are added as they go. I want the "Audit" step to be the same as above, but doing this recursively forever is silly of course, not totally sure how to handle that yet, but let's try it first to see how it goes.
-
-Child tasks do not block their Epic. The `parent-child` relationship keeps the
-work grouped under the Epic, and Beads prevents the Epic from closing while it
-has open child tasks.
-
-Asco dispatches open Epics for decomposition and ready non-Epic tasks for
-ordinary work. An in-progress Epic does not appear in the ready queue, while
-its ready child tasks do appear.
-
-After a child task closes, Asco checks its parent Epic. When every child task
-has closed, including the Merge task, Asco closes that Epic by ID.
-
-Engineers may create further tasks as they learn about the work. A task that
-belongs to the current feature is created as another child of the current Epic
-with any required `blocks` dependencies. An independent follow-up task uses a
-`discovered-from` dependency. A large independent effort may be created as a
-new Epic and follows the same lifecycle.
+The Engineer framework directs code work through ordinary Integration tasks labelled
+`asco:integration`. Their Engineers merge named branches into the default branch and validate the
+result. The dispatcher serializes those tasks but does not make merge decisions.
 
 ## Engineer communication and escalation
 
 Engineers communicate between tasks by using comments on tasks and referencing task IDs when needed. For instance, when decomposing the original user-requested task, the Engineer may file the tasks in reverse order, so that it can add instructions "leave comments on the next tickets as you learn important things".
 
-To escalate, a worker first changes its current task to `blocked`, then files a blocked task of type "escalation" under the current Epic. The escalation metadata records the blocked task ID, and its description states the question, options, and consequence of each option. The UI lists blocked escalations that wait for the user. `asco answer ESCALATION_ID "answer"` adds the answer as a comment, closes the escalation, and reopens its recorded blocked task for an Engineer retry.
+When a worker needs a user decision, it changes its own task to `blocked`, sets
+`asco_needs_input=true`, and adds a comment with the question, options, and consequences. The UI
+lists those tasks. `asco answer TASK_ID "answer"` adds the answer as a comment, clears the marker,
+and reopens the same task. Separate escalation tasks and Beads gates are not used.
 
-When an Engineer process exits while its task remains `in_progress`, Asco blocks that task and files one linked escalation rather than automatically retrying it. An already closed task remains complete when its process later exits. Beads gates are not used for this workflow because their built-in human gate is a formula-step wait condition, while an escalation must retain a question, options, task comments, and a direct link to the task that waits for the answer.
+When an Engineer process exits while its task remains `in_progress`, Asco reopens the task and
+retries it once. A second unfinished exit changes that same task to `blocked` with
+`asco_needs_input=true` and a comment that names its worker log. An already closed task remains
+complete when its process later exits.

@@ -76,7 +76,7 @@ class AscoTests(unittest.TestCase):
         self.assertEqual(delays, [])
 
     def test_task_paths_are_under_common_state_directory(self):
-        worktree, branch, log = asco.task_paths("/project", "bd-42", "bd-1")
+        worktree, branch, log = asco.task_paths("/project", "bd-42")
         self.assertEqual(worktree, Path("/project/.asco/worktrees/tasks/bd-42"))
         self.assertEqual(branch, "asco/task-bd-42")
         self.assertEqual(log, Path("/project/.asco/logs/bd-42.log"))
@@ -106,17 +106,23 @@ class AscoTests(unittest.TestCase):
         self.assertTrue(asco.metadata_true({"asco_merged": "true"}, "asco_merged"))
         self.assertFalse(asco.metadata_true({"asco_merged": False}, "asco_merged"))
 
-    def test_legacy_parent_is_not_an_asco_epic(self):
+    def test_all_ordinary_task_types_are_dispatchable(self):
         runner = asco.Runner("/project", 2)
-        parent = {"id": "bd-1", "issue_type": "engineering"}
-        child = {"id": "bd-2", "parent": "bd-1"}
-        self.assertIsNone(runner.epic_for(child, [parent, child]))
+        ready = [{"id": "bd-1", "issue_type": "bug"}, {"id": "bd-2", "issue_type": "task"},
+                 {"id": "bd-3", "issue_type": "epic"}]
+        self.assertEqual(runner.dispatchable_tasks(ready, ready), ready)
 
     def test_escalation_is_not_dispatchable(self):
         runner = asco.Runner("/project", 2)
-        epic = {"id": "bd-1", "issue_type": "epic"}
-        escalation = {"id": "bd-2", "issue_type": "escalation", "parent": "bd-1"}
-        self.assertEqual(runner.dispatchable_tasks([epic, escalation], [epic, escalation]), [epic])
+        task = {"id": "bd-1", "issue_type": "task"}
+        escalation = {"id": "bd-2", "issue_type": "escalation"}
+        self.assertEqual(runner.dispatchable_tasks([task, escalation], [task, escalation]), [task])
+
+    def test_only_one_integration_task_is_dispatchable(self):
+        runner = asco.Runner("/project", 2)
+        integration = {"id": "bd-1", "status": "open", "labels": ["asco:integration"]}
+        active = {"id": "bd-2", "status": "in_progress", "labels": ["asco:integration"]}
+        self.assertEqual(runner.dispatchable_tasks([integration], [integration, active]), [])
 
     def test_blocking_ids_handles_beads_dependency_records(self):
         self.assertEqual(asco.blocking_ids({"blocked_by": [{"depends_on_id": "bd-1"}, "bd-2"]}), ["bd-1", "bd-2"])
@@ -145,11 +151,11 @@ class AscoTests(unittest.TestCase):
         self.assertIn("engineer-1", asco.render_status(snapshot, root="/project"))
 
     @patch.object(asco, "dispatcher_processes", return_value=[])
-    @patch.object(asco, "visible_issues", return_value=([{"id": "bd-1", "status": "blocked", "issue_type": "escalation", "title": "Need a choice", "description": "Choose A or B."}], {}))
+    @patch.object(asco, "visible_issues", return_value=([{"id": "bd-1", "status": "blocked", "title": "Need a choice", "description": "Choose A or B.", "metadata": {"asco_needs_input": True}}], {}))
     @patch.object(asco, "process_alive", return_value=False)
-    def test_status_places_waiting_escalation_above_task_table(self, alive, visible, dispatchers):
+    def test_status_places_waiting_task_above_task_table(self, alive, visible, dispatchers):
         report = asco.render_status("/project")
-        self.assertIn("Escalations waiting for you:", report)
+        self.assertIn("Tasks waiting for you:", report)
         self.assertIn("Choose A or B.", report)
 
     @patch.object(asco, "dispatcher_processes", return_value=["4144  00:01 python asco.py _serve"])
@@ -163,15 +169,16 @@ class AscoTests(unittest.TestCase):
             log.write_text("one\ntwo\nthree\n", encoding="utf-8")
             self.assertEqual(asco.log_tail(root, 2), ["two", "three"])
 
-    def test_engineer_prompt_names_commit_and_escalation_rules(self):
+    def test_engineer_prompt_loads_the_audit_framework(self):
         prompt = asco.engineer_prompt({"id": "bd-2", "title": "Implement", "description": "Build it"},
-                                      {"id": "bd-1", "description": "Feature request"},
                                       Path(__file__).parents[1], Path("/project/worktree"), "asco/task-bd-2",
                                       Path(__file__).parents[1] / ".asco/logs/bd-2.log")
         self.assertIn("Commit every repository change", prompt)
-        self.assertIn("type escalation", prompt)
-        self.assertIn("asco_blocked_task=bd-2", prompt)
-        self.assertIn("--parent bd-1", prompt)
+        self.assertIn("asco_needs_input=true", prompt)
+        audit = asco.engineer_prompt({"id": "bd-3", "metadata": {"asco_prompt": "audit"}},
+                                     Path(__file__).parents[1], Path("/project/worktree"), "asco/task-bd-3",
+                                     Path(__file__).parents[1] / ".asco/logs/bd-3.log")
+        self.assertIn("Audit framework", audit)
 
     @patch.object(asco, "process_alive", return_value=True)
     def test_closed_worker_still_counts_until_its_process_exits(self, alive):
@@ -179,34 +186,20 @@ class AscoTests(unittest.TestCase):
         runner.bd.all = lambda: [{"id": "bd-1", "status": "closed", "metadata": {"asco_pid": "12"}}]
         self.assertEqual(runner.worker_count(), 1)
 
-    def test_escalation_type_is_added_without_removing_existing_types(self):
-        runner = asco.Runner("/project", 2)
-        calls = []
-        class Result:
-            returncode = 0
-            stdout = "review,gate\n"
-        def run(*args, **kwargs):
-            calls.append(args)
-            return Result()
-        runner.bd.run = run
-        runner.ensure_escalation_type()
-        self.assertIn(("config", "set", "types.custom", "review,gate,escalation"), calls)
-
-    def test_answer_reopens_the_blocked_task_and_closes_escalation(self):
+    def test_answer_reopens_the_task_waiting_for_input(self):
         class FakeBeads:
             def __init__(self, root):
                 self.calls = []
             def show(self, issue):
-                return {"metadata": {"asco_blocked_task": "bd-1"}}
+                return {"status": "blocked", "metadata": {"asco_needs_input": True}}
             def comment(self, *args):
                 self.calls.append(("comment",) + args)
             def run(self, *args):
                 self.calls.append(("run",) + args)
         fake = FakeBeads("/project")
         with patch.object(asco, "Beads", return_value=fake):
-            asco.answer_escalation("/project", "bd-2", "Retry it.")
-        self.assertIn(("run", "close", "bd-2", "--reason", "The user answered the escalation."), fake.calls)
-        self.assertIn(("run", "update", "bd-1", "--status", "open"), fake.calls)
+            asco.answer_task("/project", "bd-2", "Retry it.")
+        self.assertIn(("run", "update", "bd-2", "--status", "open", "--unset-metadata", "asco_needs_input"), fake.calls)
 
     def test_start_clears_exit_metadata_before_starting_a_retry(self):
         runner = asco.Runner("/project", 2)
@@ -241,9 +234,9 @@ class AscoTests(unittest.TestCase):
         runner, issues = self.cleanup_runner("/project/.asco/worktrees/tasks/bd-2")
         with patch.object(asco, "registered_worktrees", return_value=set()), \
              patch.object(asco, "command") as command_call:
-            runner.cleanup_closed_epics(issues)
+            runner.cleanup_closed_tasks(issues)
         command_call.assert_not_called()
-        self.assertEqual(runner.bd.metadata[0][0], ("bd-1",))
+        self.assertEqual(len(runner.bd.metadata), 2)
         self.assertEqual(runner.bd.metadata[0][1]["cleaned"], "true")
 
     @patch.object(asco, "process_alive", return_value=False)
@@ -255,18 +248,18 @@ class AscoTests(unittest.TestCase):
             stderr = ""
         with patch.object(asco, "registered_worktrees", return_value={path}), \
              patch.object(asco, "command", return_value=Result()) as command_call:
-            runner.cleanup_closed_epics(issues)
+            runner.cleanup_closed_tasks(issues)
         command_call.assert_called_once_with(runner.root, ["git", "worktree", "remove", str(path)], check=False)
-        self.assertEqual(runner.bd.metadata[0][1]["cleaned"], "true")
+        self.assertEqual(len(runner.bd.metadata), 2)
 
     @patch.object(asco, "process_alive", return_value=False)
     def test_cleanup_refuses_an_out_of_scope_worktree(self, alive):
         runner, issues = self.cleanup_runner("/outside/bd-2")
         with patch.object(asco, "registered_worktrees", return_value={Path("/outside/bd-2")}), \
              patch.object(asco, "command") as command_call:
-            runner.cleanup_closed_epics(issues)
+            runner.cleanup_closed_tasks(issues)
         command_call.assert_not_called()
-        self.assertEqual(runner.bd.metadata, [])
+        self.assertEqual(len(runner.bd.metadata), 1)
 
 
 if __name__ == "__main__":

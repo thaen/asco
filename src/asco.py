@@ -79,6 +79,14 @@ def is_escalation(issue):
     return issue_type(issue) == "escalation" or "escalation" in labels
 
 
+def has_label(issue, label):
+    return label in (issue.get("labels") or [])
+
+
+def is_integration(issue):
+    return has_label(issue, "asco:integration")
+
+
 def metadata(issue):
     value = issue.get("metadata") or {}
     if not isinstance(value, dict):
@@ -93,6 +101,10 @@ def metadata(issue):
 
 def metadata_true(record, key):
     return record.get(key) is True or record.get(key) == "true"
+
+
+def needs_input(issue):
+    return issue.get("status") == "blocked" and metadata_true(metadata(issue), "asco_needs_input")
 
 
 def parent_id(issue):
@@ -141,12 +153,11 @@ def default_branch(root):
     return command(root, ["git", "branch", "--show-current"]).stdout.strip()
 
 
-def task_paths(root, task_id, epic_id=None):
+def task_paths(root, task_id):
     state = Path(root) / ".asco"
     safe = task_id.replace("/", "-")
-    kind = "epics" if epic_id is None else "tasks"
-    worktree = state / "worktrees" / kind / safe
-    branch = "asco/%s%s" % ("epic-" if epic_id is None else "task-", safe)
+    worktree = state / "worktrees" / "tasks" / safe
+    branch = "asco/task-" + safe
     return worktree, branch, state / "logs" / (safe + ".log")
 
 
@@ -168,10 +179,23 @@ def registered_worktrees(root):
             for line in result.stdout.splitlines() if line.startswith("worktree ")}
 
 
-def engineer_prompt(issue, epic, root, worktree, branch, log_path):
+def prompt_name(issue):
+    return metadata(issue).get("asco_prompt", "engineer")
+
+
+def prompt_text(root, name):
+    if not name.replace("-", "").isalnum():
+        raise CommandError("invalid prompt name: %s" % name)
+    prompts = (Path(root) / "prompts").resolve()
+    path = (prompts / (name + ".md")).resolve()
+    if prompts not in path.parents or not path.is_file():
+        raise CommandError("prompt framework does not exist: %s" % name)
+    return path.read_text(encoding="utf-8")
+
+
+def engineer_prompt(issue, root, worktree, branch, log_path):
     task = issue_id(issue)
-    parent = issue_id(epic) if epic else None
-    original = (epic or issue).get("description", "")
+    framework = prompt_name(issue)
     return f"""You are the Engineer assigned to Beads task {task}.
 
 You work in {worktree} on branch {branch}. The repository root is {root}. The task is:
@@ -180,17 +204,11 @@ You work in {worktree} on branch {branch}. The repository root is {root}. The ta
 
 {issue.get('description', '')}
 
-The feature Epic is {parent or task}. Its original request is:
+The selected prompt framework is `{framework}`:
 
-{original}
+{prompt_text(root, 'engineer')}
 
-Use Beads for durable communication. Read comments before work and add a concise handoff comment when the task is complete. Make only the changes this task requires. Commit every repository change on this branch before closing the task. Do not merge your branch into the Epic integration branch; Asco performs that merge before dependent work begins. Do not close a task with uncommitted changes.
-
-If a decision needs a user answer, first set this task to blocked. Create a blocked Beads task of type escalation under Epic {parent or task}; state the question, options, and the consequence of each option. Set the escalation metadata `asco_blocked_task={task}`. The `asco answer` command closes the escalation and reopens that blocked task. If a new task belongs to this feature, create it with --parent {parent or task}, add required blocks dependencies, and describe its relationship in a comment.
-
-For an Epic decomposition task, create child tasks for high-level tests, implementation, test, audit, and merge as the work requires. Use blocks dependencies in the required order. The merge task must block on every task whose branch it integrates. Include this original request in the audit task. The Epic remains in progress while its children run.
-
-For a merge task, acquire `bd merge-slot acquire` before merging the Epic integration branch into {default_branch(root)}, then build and test. Release the slot in a finally-style cleanup step. Do not remove any worktree. Asco removes child and integration worktrees after it closes the Epic.
+{'' if framework == 'engineer' else prompt_text(root, framework)}
 
 Worker output is recorded at {log_path.relative_to(root)}. Beads metadata contains this worker's process record.
 """
@@ -207,13 +225,6 @@ class Runner:
     def log(self, message):
         print("%s asco: %s" % (stamp(), message), file=sys.stderr, flush=True)
 
-    def ensure_escalation_type(self):
-        configured = self.bd.run("config", "get", "types.custom", check=False)
-        types = [item.strip() for item in configured.stdout.strip().split(",") if item.strip()]
-        if "escalation" not in types:
-            types.append("escalation")
-            self.bd.run("config", "set", "types.custom", ",".join(types))
-
     def worker_count(self):
         count = 0
         for issue in self.bd.all():
@@ -222,12 +233,6 @@ class Runner:
                 count += 1
         return count
 
-    def epic_for(self, issue, issues):
-        parent = parent_id(issue)
-        by_id = {issue_id(item): item for item in issues}
-        candidate = by_id.get(parent)
-        return candidate if candidate and issue_type(candidate) == "epic" else None
-
     def clear_exit_metadata(self, task):
         self.bd.run("update", task,
                     "--unset-metadata", "asco_exited_at",
@@ -235,32 +240,23 @@ class Runner:
                     "--unset-metadata", "asco_exit_code")
 
     def dispatchable_tasks(self, ready, issues):
-        return [issue for issue in ready if not is_escalation(issue) and
-                (issue_type(issue) == "epic" or self.epic_for(issue, issues))]
+        active_integration = any(issue.get("status") == "in_progress" and is_integration(issue)
+                                 for issue in issues)
+        return [issue for issue in ready
+                if not is_escalation(issue) and not has_label(issue, "gt:slot") and
+                (not is_integration(issue) or not active_integration)]
 
     def start(self, issue, issues):
         task = issue_id(issue)
-        epic = self.epic_for(issue, issues)
-        if issue_type(issue) == "epic":
-            worktree, branch, log_path = task_paths(self.root, task)
-            make_worktree(self.root, worktree, branch, default_branch(self.root))
-        else:
-            if not epic:
-                return False
-            integration = metadata(epic).get("asco_worktree")
-            integration_branch = metadata(epic).get("asco_branch")
-            if not integration or not integration_branch:
-                self.escalate(task, "The parent Epic has no integration worktree record.", blocked_task=task)
-                return False
-            worktree, branch, log_path = task_paths(self.root, task, issue_id(epic))
-            make_worktree(self.root, worktree, branch, integration_branch)
+        worktree, branch, log_path = task_paths(self.root, task)
+        make_worktree(self.root, worktree, branch, default_branch(self.root))
 
         claimed = self.bd.run("update", task, "--claim", check=False)
         if claimed.returncode:
             return False
         self.clear_exit_metadata(task)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        prompt = engineer_prompt(issue, epic, self.root, worktree, branch, log_path)
+        prompt = engineer_prompt(issue, self.root, worktree, branch, log_path)
         log = open(log_path, "a", encoding="utf-8")
         child = subprocess.Popen(
             ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"],
@@ -272,39 +268,21 @@ class Runner:
         child.stdin.close()
         log.close()
         self.workers[task] = child
-        self.bd.update_metadata(task, agent="engineer", pid=child.pid, started_at=stamp(),
+        attempts = int(metadata(issue).get("asco_attempts", 0)) + 1
+        self.bd.update_metadata(task, agent="engineer", pid=child.pid, started_at=stamp(), attempts=attempts,
                                 branch=branch, worktree=worktree, log=log_path.relative_to(self.root))
         self.bd.comment(task, "Asco started Engineer PID %s in %s." % (child.pid, branch))
         return True
 
-    def escalate(self, source, reason, blocked_task=None):
-        title = "Asco escalation for %s" % source
-        for issue in self.bd.all():
-            if issue.get("status") == "closed":
-                continue
-            record = metadata(issue)
-            if record.get("asco_source") == source or issue.get("title") == title:
-                return
-        source_issue = self.bd.show(source)
-        args = ["create", title, "--type", "escalation", "--description", reason, "--silent"]
-        if parent_id(source_issue):
-            args.extend(["--parent", parent_id(source_issue)])
-        result = self.bd.run(*args, check=False)
-        if result.returncode:
-            args[args.index("escalation")] = "task"
-            args.extend(["--add-label", "escalation"])
-            result = self.bd.run(*args)
-        escalation = result.stdout.strip()
-        self.bd.run("update", escalation, "--status", "blocked")
-        values = {"source": source}
-        if blocked_task:
-            self.bd.run("update", blocked_task, "--status", "blocked")
-            values["blocked_task"] = blocked_task
-        self.bd.update_metadata(escalation, **values)
-        self.bd.comment(source, "Asco escalated: %s" % reason)
-
     def recover_unfinished_task(self, task, record):
-        self.escalate(task, "Engineer process exited while this task remained in progress. Review %s and choose whether to retry the task." % record.get("asco_log", "the worker log"), blocked_task=task)
+        attempts = int(record.get("asco_attempts", 1))
+        log = record.get("asco_log", "the worker log")
+        if attempts < 2:
+            self.bd.run("update", task, "--status", "open")
+            self.bd.comment(task, "Engineer exited before completion. Asco will retry once; see %s." % log)
+            return
+        self.bd.run("update", task, "--status", "blocked", "--set-metadata", "asco_needs_input=true")
+        self.bd.comment(task, "Engineer exited twice before completion. Review %s and run `asco answer %s \"...\"`." % (log, task))
 
     def reap(self, issues):
         for issue in issues:
@@ -316,84 +294,46 @@ class Runner:
             if worker and exit_code is not None:
                 self.workers.pop(task, None)
                 self.bd.update_metadata(task, exited_at=stamp(), exit_state="exited", exit_code=exit_code)
-                if issue.get("status") == "in_progress":
+                if self.bd.show(task).get("status") == "in_progress":
                     self.recover_unfinished_task(task, record)
             elif pid and not process_alive(pid) and not record.get("asco_exited_at"):
                 self.bd.update_metadata(task, exited_at=stamp(), exit_state="unknown-after-restart")
-                if issue.get("status") == "in_progress":
+                if self.bd.show(task).get("status") == "in_progress":
                     self.recover_unfinished_task(task, record)
 
-    def integrate(self, issues):
+    def cleanup_closed_tasks(self, issues):
+        try:
+            registered = registered_worktrees(self.root)
+        except CommandError as error:
+            self.log("could not list worktrees: %s" % error)
+            return
+        expected = (self.root / ".asco" / "worktrees").resolve()
         for issue in issues:
-            if issue.get("status") != "closed" or issue_type(issue) == "epic":
-                continue
             record = metadata(issue)
-            if metadata_true(record, "asco_merged"):
+            raw_path = record.get("asco_worktree")
+            if issue.get("status") != "closed" or not raw_path or metadata_true(record, "asco_cleaned"):
                 continue
-            epic = self.epic_for(issue, issues)
-            if not epic:
+            if process_alive(record.get("asco_pid")):
                 continue
-            source = record.get("asco_branch")
-            target = metadata(epic).get("asco_worktree")
-            if not source or not target:
+            path = Path(raw_path).resolve()
+            if expected not in path.parents:
+                self.log("refused to remove out-of-scope worktree for %s: %s" % (issue_id(issue), path))
                 continue
-            result = command(self.root, ["git", "-C", target, "merge", "--no-ff", "--no-edit", source], check=False)
-            if result.returncode:
-                self.escalate(issue_id(issue), "Asco could not merge %s into %s: %s" % (source, target, result.stderr.strip()))
-                continue
-            self.bd.update_metadata(issue_id(issue), merged="true", merged_at=stamp())
-            self.bd.comment(issue_id(issue), "Asco merged %s into the Epic integration branch." % source)
-
-    def close_epics(self, issues):
-        for epic in issues:
-            if issue_type(epic) != "epic" or epic.get("status") != "in_progress":
-                continue
-            children = [item for item in issues if parent_id(item) == issue_id(epic)]
-            if children and all(item.get("status") == "closed" for item in children):
-                self.bd.run("close", issue_id(epic))
-
-    def cleanup_closed_epics(self, issues):
-        for epic in issues:
-            if issue_type(epic) != "epic" or epic.get("status") != "closed":
-                continue
-            record = metadata(epic)
-            if metadata_true(record, "asco_cleaned"):
-                continue
-            children = [item for item in issues if parent_id(item) == issue_id(epic)]
-            if any(process_alive(metadata(item).get("asco_pid")) for item in children):
-                continue
-            try:
-                registered = registered_worktrees(self.root)
-            except CommandError as error:
-                self.log("could not list worktrees while cleaning %s: %s" % (issue_id(epic), error))
-                continue
-            paths = [metadata(item).get("asco_worktree") for item in children]
-            paths.append(record.get("asco_worktree"))
-            expected = (self.root / ".asco" / "worktrees").resolve()
-            for path in filter(None, paths):
-                path = Path(path).resolve()
-                if expected not in path.parents:
-                    self.log("refused to remove out-of-scope worktree for %s: %s" % (issue_id(epic), path))
-                    break
-                if path not in registered:
-                    self.log("worktree already removed for %s: %s" % (issue_id(epic), path))
-                    continue
+            if path in registered:
                 result = command(self.root, ["git", "worktree", "remove", str(path)], check=False)
                 if result.returncode:
                     self.log("could not remove closed worktree for %s: %s: %s" %
-                             (issue_id(epic), path, result.stderr.strip()))
-                    break
+                             (issue_id(issue), path, result.stderr.strip()))
+                    continue
                 registered.remove(path)
             else:
-                self.bd.update_metadata(issue_id(epic), cleaned="true", cleaned_at=stamp())
+                self.log("worktree already removed for %s: %s" % (issue_id(issue), path))
+            self.bd.update_metadata(issue_id(issue), cleaned="true", cleaned_at=stamp())
 
     def cycle(self):
         issues = self.bd.all()
         self.reap(issues)
-        self.integrate(issues)
-        refreshed = self.bd.all()
-        self.close_epics(refreshed)
-        self.cleanup_closed_epics(self.bd.all())
+        self.cleanup_closed_tasks(self.bd.all())
         capacity = self.parallel - self.worker_count()
         if capacity <= 0:
             return
@@ -411,7 +351,6 @@ class Runner:
                 capacity -= 1
 
     def serve(self):
-        self.ensure_escalation_type()
         while True:
             try:
                 self.cycle()
@@ -439,9 +378,9 @@ def render_status(snapshot, all_closed=False, root=None):
     dispatchers = dispatcher_processes(root)
     dispatcher = "running: " + "; ".join(dispatchers) if dispatchers else "not running"
     lines = ["ASCO task status", "Dispatcher: " + dispatcher, ""]
-    waiting = [issue for issue in issues if issue.get("status") == "blocked" and is_escalation(issue)]
+    waiting = [issue for issue in issues if needs_input(issue)]
     if waiting:
-        lines.extend(["Escalations waiting for you:"])
+        lines.extend(["Tasks waiting for you:"])
         for issue in waiting:
             lines.append("%s: %s" % (issue_id(issue), issue.get("title", "")))
             lines.append("  " + issue.get("description", ""))
@@ -459,7 +398,7 @@ def render_status(snapshot, all_closed=False, root=None):
         suffix = " [blocked by %s]" % blockers if blockers else ""
         lines.append("%-16s %-21s %-20.20s %-12s %s%s" %
                      (task, status, assigned, worker, issue.get("title", ""), suffix))
-    lines.extend(["", "Use `asco answer ESCALATION_ID \"answer\"` to answer an escalation."])
+    lines.extend(["", "Use `asco answer TASK_ID \"answer\"` to resume a task waiting for you."])
     return "\n".join(lines)
 
 
@@ -472,16 +411,13 @@ def log_tail(root, count=5):
         return []
 
 
-def answer_escalation(root, issue_id_value, text):
+def answer_task(root, issue_id_value, text):
     bd = Beads(root)
-    escalation = bd.show(issue_id_value)
-    blocked_task = metadata(escalation).get("asco_blocked_task")
-    if not blocked_task:
-        raise CommandError("%s has no asco_blocked_task metadata" % issue_id_value)
+    task = bd.show(issue_id_value)
+    if not needs_input(task):
+        raise CommandError("%s is not waiting for user input" % issue_id_value)
     bd.comment(issue_id_value, "User answer: %s" % text)
-    bd.run("close", issue_id_value, "--reason", "The user answered the escalation.")
-    bd.run("update", blocked_task, "--status", "open")
-    bd.comment(blocked_task, "The user answered escalation %s: %s" % (issue_id_value, text))
+    bd.run("update", issue_id_value, "--status", "open", "--unset-metadata", "asco_needs_input")
 
 
 class DashboardController:
@@ -560,7 +496,7 @@ def main(argv=None):
     status = commands.add_parser("status", help="print Beads task status")
     status.add_argument("--all-closed", action="store_true")
     commands.add_parser("dashboard", help="open the terminal dashboard")
-    answer = commands.add_parser("answer", help="record an answer on an escalation")
+    answer = commands.add_parser("answer", help="record an answer and resume a blocked task")
     answer.add_argument("issue")
     answer.add_argument("text")
     args = parser.parse_args(argv)
@@ -583,8 +519,8 @@ def main(argv=None):
     elif args.command == "dashboard":
         dashboard(root)
     else:
-        answer_escalation(root, args.issue, args.text)
-        print("The answer was recorded, the escalation closed, and its blocked task reopened.")
+        answer_task(root, args.issue, args.text)
+        print("The answer was recorded and the task was reopened.")
 
 
 if __name__ == "__main__":
