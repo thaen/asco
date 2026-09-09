@@ -34,13 +34,19 @@ class SnapshotReader:
 
 
 class AscoTests(unittest.TestCase):
+    def dashboard_snapshot(self, name):
+        return ([{"id": name, "status": "open", "title": name}], {})
+
     def run_dashboard(self, keys, snapshots):
         screen = ScriptedDashboardScreen(keys)
         reader = SnapshotReader(snapshots)
         delays = []
         controller = asco.DashboardController(
             reader,
-            lambda snapshot, show_all: "%s all_closed=%s" % (snapshot, show_all),
+            lambda snapshot, show_all, selected: "%s all_closed=%s selected=%s" % (snapshot, show_all, selected),
+            asco.render_task_detail,
+            lambda issue: ["log %s" % issue["id"]],
+            asco.render_worker_log,
             screen,
             lambda: delays.append(None),
         )
@@ -49,18 +55,22 @@ class AscoTests(unittest.TestCase):
 
     def test_dashboard_reloads_after_the_source_changes(self):
         screen = ScriptedDashboardScreen([-1])
-        reader = SnapshotReader(["initial"])
+        snapshot = self.dashboard_snapshot("initial")
+        reader = SnapshotReader([snapshot])
         changes = [True]
         controller = asco.DashboardController(
             reader,
-            lambda snapshot, show_all: "%s all_closed=%s" % (snapshot, show_all),
+            lambda snapshot, show_all, selected: "%s all_closed=%s selected=%s" % (snapshot, show_all, selected),
+            asco.render_task_detail,
+            lambda issue: ["log %s" % issue["id"]],
+            asco.render_worker_log,
             screen,
             lambda: self.fail("The controller must not sleep before it reloads."),
             lambda: changes.pop(0),
         )
         self.assertTrue(controller.run())
-        self.assertEqual(reader.calls, ["initial"])
-        self.assertEqual(screen.drawn, ["initial all_closed=False"])
+        self.assertEqual(reader.calls, [snapshot])
+        self.assertEqual(screen.drawn, ["%s all_closed=False selected=initial" % (snapshot,)])
 
     def test_file_change_detector_notices_a_source_update(self):
         with tempfile.TemporaryDirectory() as root:
@@ -73,30 +83,81 @@ class AscoTests(unittest.TestCase):
 
     def test_dashboard_quit_reads_a_fresh_snapshot_before_exit(self):
         screen, reader, delays = self.run_dashboard(
-            [ord("q")], ["initial", "quit refresh"]
+            [ord("q")], [self.dashboard_snapshot("initial"), self.dashboard_snapshot("quit refresh")]
         )
-        self.assertEqual(reader.calls, ["initial", "quit refresh"])
-        self.assertEqual(screen.drawn, ["initial all_closed=False"])
+        self.assertEqual(reader.calls, [self.dashboard_snapshot("initial"), self.dashboard_snapshot("quit refresh")])
+        self.assertEqual(screen.drawn, ["([{'id': 'initial', 'status': 'open', 'title': 'initial'}], {}) all_closed=False selected=initial"])
         self.assertEqual(delays, [])
 
     def test_dashboard_idle_ticks_keep_the_initial_snapshot(self):
         screen, reader, delays = self.run_dashboard(
-            [-1, -1, ord("q")], ["initial", "quit refresh"]
+            [-1, -1, ord("q")], [self.dashboard_snapshot("initial"), self.dashboard_snapshot("quit refresh")]
         )
-        self.assertEqual(reader.calls, ["initial", "quit refresh"])
-        self.assertEqual(screen.drawn, ["initial all_closed=False"] * 3)
+        self.assertEqual(reader.calls, [self.dashboard_snapshot("initial"), self.dashboard_snapshot("quit refresh")])
+        self.assertEqual(screen.drawn, ["([{'id': 'initial', 'status': 'open', 'title': 'initial'}], {}) all_closed=False selected=initial"] * 3)
         self.assertEqual(delays, [None, None])
 
     def test_dashboard_closed_toggle_refreshes_and_draws_changed_view(self):
         screen, reader, delays = self.run_dashboard(
             [ord("c"), ord("q")],
-            ["recent closed items", "all closed items", "quit refresh"],
+            [self.dashboard_snapshot("recent closed items"), self.dashboard_snapshot("all closed items"), self.dashboard_snapshot("quit refresh")],
         )
-        self.assertEqual(reader.calls, ["recent closed items", "all closed items", "quit refresh"])
+        self.assertEqual(reader.calls, [self.dashboard_snapshot("recent closed items"), self.dashboard_snapshot("all closed items"), self.dashboard_snapshot("quit refresh")])
         self.assertEqual(screen.drawn, [
-            "recent closed items all_closed=False",
-            "all closed items all_closed=True",
+            "([{'id': 'recent closed items', 'status': 'open', 'title': 'recent closed items'}], {}) all_closed=False selected=recent closed items",
+            "([{'id': 'all closed items', 'status': 'open', 'title': 'all closed items'}], {}) all_closed=True selected=all closed items",
         ])
+        self.assertEqual(delays, [])
+
+    def test_dashboard_navigation_selects_a_task_without_reading_again(self):
+        snapshot = ([
+            {"id": "bd-1", "status": "open", "title": "First"},
+            {"id": "bd-2", "status": "open", "title": "Second"},
+        ], {})
+        screen, reader, delays = self.run_dashboard([ord("j"), ord("q")], [snapshot, "quit refresh"])
+        self.assertEqual(reader.calls, [snapshot, "quit refresh"])
+        self.assertEqual(screen.drawn, [
+            "%s all_closed=False selected=bd-1" % (snapshot,),
+            "%s all_closed=False selected=bd-2" % (snapshot,),
+        ])
+        self.assertEqual(delays, [])
+
+    def test_dashboard_details_refresh_and_show_blockers_for_selected_task(self):
+        initial = ([
+            {"id": "bd-1", "status": "open", "title": "First"},
+            {"id": "bd-2", "status": "open", "title": "Second"},
+        ], {"bd-2": {"blocked_by": ["bd-9"]}})
+        fresh = ([
+            {"id": "bd-1", "status": "open", "title": "First"},
+            {"id": "bd-2", "status": "open", "title": "Second", "description": "The complete description."},
+        ], {"bd-2": {"blocked_by": ["bd-9"]}})
+        screen, reader, delays = self.run_dashboard(
+            [ord("j"), 10, 27, ord("q")], [initial, fresh, "quit refresh"]
+        )
+        self.assertEqual(reader.calls, [initial, fresh, "quit refresh"])
+        self.assertIn("Task details: bd-2", screen.drawn[2])
+        self.assertIn("The complete description.", screen.drawn[2])
+        self.assertIn("- bd-9", screen.drawn[2])
+        self.assertEqual(screen.drawn[3], "%s all_closed=False selected=bd-2" % (fresh,))
+        self.assertEqual(delays, [])
+
+    def test_dashboard_opens_the_selected_workers_log_from_the_table(self):
+        initial = ([
+            {"id": "bd-1", "status": "open", "title": "First"},
+            {"id": "bd-2", "status": "open", "title": "Second"},
+        ], {})
+        fresh = ([
+            {"id": "bd-1", "status": "open", "title": "First"},
+            {"id": "bd-2", "status": "open", "title": "Second"},
+        ], {})
+        screen, reader, delays = self.run_dashboard(
+            [ord("j"), ord("l"), 27, 27, ord("q")], [initial, fresh, "quit refresh"]
+        )
+        self.assertEqual(reader.calls, [initial, fresh, "quit refresh"])
+        self.assertIn("Worker log: bd-2", screen.drawn[2])
+        self.assertIn("log bd-2", screen.drawn[2])
+        self.assertIn("Task details: bd-2", screen.drawn[3])
+        self.assertEqual(screen.drawn[4], "%s all_closed=False selected=bd-2" % (fresh,))
         self.assertEqual(delays, [])
 
     def test_task_paths_are_under_common_state_directory(self):
