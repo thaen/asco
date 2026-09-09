@@ -32,16 +32,18 @@ Use the status view for a plain terminal report or the dashboard for a refreshin
 ./asco answer ASCO-42 "Use the first option because it preserves the API."
 ```
 
-The dashboard watches `src/asco.py` while it runs. A source update closes the
-current curses screen and replaces the dashboard process with the updated code,
-so the dashboard returns without a separate terminal restart.
+The dashboard checks `src/asco.py` after terminal input. A source update closes
+the current curses screen and replaces the dashboard process with the updated
+code, so the dashboard returns without a separate terminal restart.
 
-The dashboard polls Beads every quarter second while it is idle. The selected
-task remains selected after a refresh when it is visible, and the first visible
-task becomes selected when the previous task is absent. You can use the arrow
-keys or `j` and `k` to move the selection, `Enter` or `d` to open task details,
-and `l` to open the selected task's worker log. The detail view shows the full
-description and blocker IDs, and `Escape` returns to the preceding view.
+The dashboard waits for terminal input, so every key operation runs as soon as
+the terminal reports it. Press `r` to read a current Beads snapshot. The
+selected task remains selected after that refresh when it is visible, and the
+first visible task becomes selected when the previous task is absent. You can
+use the arrow keys or `j` and `k` to move the selection, `Enter` or `d` to open
+task details, and `l` to open the selected task's worker log. The detail view
+shows the full description and blocker IDs, and `Escape` returns to the
+preceding view.
 
 The editable worker frameworks are `prompts/engineer.md` and `prompts/audit.md`. Set `asco_prompt=audit` on an ordinary task to append the Audit framework to its Engineer prompt. Label an ordinary task `asco:integration` when its Engineer must merge named work branches into the default branch; Asco runs one Integration task at a time.
 
