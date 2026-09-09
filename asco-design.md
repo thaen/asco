@@ -30,6 +30,23 @@ bd create "Title" --type task --description "Read file X and do what it says, or
 
 `asco` polls the ready queue and starts agents using `codex exec` with instructions to work on specific tasks, using the coordinator patterns from the Beads coordination document linked above.. It starts new tasks until there are X running tasks, then waits for one to finish before starting the next one.
 
+### Dispatcher parallel-limit reconfiguration
+
+A later `asco run --parallel N` command changes the limit for its repository.
+If the requested limit is different, Asco stops the old dispatcher and starts
+one replacement dispatcher with N as its limit. The command has a lock, and
+the serving dispatcher has a separate lock, so concurrent launchers cannot
+leave more than one dispatcher serving the repository. A command that requests
+the limit already in use leaves the existing dispatcher in place.
+
+Replacing the dispatcher does not stop active Engineer processes. Each worker
+has its own process and durable Beads process record, so the replacement
+dispatcher recognizes and counts it. Consequently, a higher limit can admit
+new ready tasks after the replacement begins. A lower limit does not cancel
+workers that already exceed it. The replacement dispatcher admits no new task
+while the active-worker count is at or above N, and it resumes admission only
+after that count falls below N.
+
 Every ready ordinary Beads task is Engineer work, regardless of whether its type is `task`,
 `bug`, `feature`, `chore`, or `epic`. Asco gives each task a branch and worktree based on the
 default branch. Engineers commit their work before closing a task. An Engineer creates a normal
