@@ -123,9 +123,55 @@ class AscoTests(unittest.TestCase):
                     pass
 
     def make_dispatcher_repository(self, issues=None):
+<<<<<<< HEAD
         project = CannedBeadsProject(self, issues)
         self.dispatcher_roots.append(project.root)
         return project.root, project.environment
+=======
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        issues_path = root / "issues.json"
+        issues_path.write_text(json.dumps(issues or []), encoding="utf-8")
+        bead = bin_dir / "bd"
+        bead.write_text("""#!/usr/bin/env python3
+import json
+import os
+import sys
+
+if "--json" in sys.argv:
+    if "ready" in sys.argv:
+        print("[]")
+    else:
+        if "list" in sys.argv:
+            calls_path = os.environ.get("ASCO_TEST_LIST_CALLS")
+            if calls_path:
+                try:
+                    with open(calls_path, encoding="utf-8") as source:
+                        calls = int(source.read() or "0")
+                except FileNotFoundError:
+                    calls = 0
+                calls += 1
+                with open(calls_path, "w", encoding="utf-8") as destination:
+                    destination.write(str(calls))
+                failures = os.environ.get("ASCO_TEST_FAIL_LIST_CALLS", "").split(",")
+                if str(calls) in failures:
+                    print("canned list failure", file=sys.stderr)
+                    sys.exit(1)
+        with open(os.environ["ASCO_TEST_ISSUES"], encoding="utf-8") as source:
+            print(source.read())
+""", encoding="utf-8")
+        bead.chmod(0o755)
+        self.dispatcher_roots.append(root)
+        self.addCleanup(directory.cleanup)
+        environment = dict(os.environ)
+        environment["ASCO_TEST_ISSUES"] = str(issues_path)
+        environment["ASCO_TEST_LIST_CALLS"] = str(root / "list-calls")
+        environment["PATH"] = str(bin_dir) + os.pathsep + environment["PATH"]
+        return root, environment
+>>>>>>> asco/task-asco-pgj
 
     def run_dispatcher(self, root, environment, parallel):
         return subprocess.run(
@@ -292,6 +338,7 @@ class AscoTests(unittest.TestCase):
         self.assertIn("in_progress", screen.drawn[1])
         self.assertIn("Claimed", screen.drawn[1])
 
+<<<<<<< HEAD
     def test_customer_journey_claim_is_visible_after_refresh(self):
         project = CannedBeadsProject(self, [
             {"id": "bd-1", "status": "open", "title": "Investigate checkout failure"},
@@ -399,6 +446,47 @@ class AscoTests(unittest.TestCase):
         self.assertIn("Completed repair.", screen.drawn[2])
 
     def test_dashboard_refresh_falls_back_to_the_first_visible_issue(self):
+=======
+    def test_dashboard_keeps_the_last_snapshot_when_a_canned_beads_read_fails(self):
+        root, environment = self.make_dispatcher_repository([
+            {"id": "bd-1", "status": "open", "title": "Waiting"},
+        ])
+        environment["ASCO_TEST_FAIL_LIST_CALLS"] = "2"
+        issues_path = root / "issues.json"
+
+        def transition():
+            issues_path.write_text(json.dumps([
+                {"id": "bd-1", "status": "in_progress", "title": "Claimed"},
+            ]), encoding="utf-8")
+
+        class TransitionScreen(ScriptedDashboardScreen):
+            def getch(self):
+                key = super().getch()
+                if key == asco.curses.ERR:
+                    transition()
+                return key
+
+        screen = TransitionScreen([asco.curses.ERR, asco.curses.ERR, ord("q")])
+        with patch.dict(os.environ, environment, clear=False):
+            controller = asco.DashboardController(
+                lambda: asco.status_snapshot(root),
+                lambda snapshot, show_all, selected: asco.render_dashboard(snapshot, show_all, selected, root),
+                asco.render_task_detail,
+                lambda issue: [],
+                asco.render_worker_log,
+                screen,
+                lambda: None,
+            )
+            controller.run()
+
+        self.assertIn("Waiting", screen.drawn[0])
+        self.assertIn("Waiting", screen.drawn[1])
+        self.assertIn("Beads refresh error: bd list --all --limit 0 --json: canned list failure", screen.drawn[1])
+        self.assertIn("Retrying on the next poll.", screen.drawn[1])
+        self.assertIn("Claimed", screen.drawn[2])
+
+    def test_dashboard_idle_refresh_falls_back_to_the_first_visible_issue(self):
+>>>>>>> asco/task-asco-pgj
         initial = ([
             {"id": "bd-1", "status": "open", "title": "First"},
             {"id": "bd-2", "status": "open", "title": "Second"},

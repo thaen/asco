@@ -748,27 +748,55 @@ class DashboardController:
         self.log_renderer = log_renderer
         self.screen = screen
         self.source_changed = source_changed
+        self.snapshot = ([], {})
+        self.snapshot_error = None
+
+    def refresh_snapshot(self):
+        try:
+            self.snapshot = self.snapshot_reader()
+        except CommandError as error:
+            self.snapshot_error = str(error)
+            return False
+        self.snapshot_error = None
+        return True
+
+    def draw(self, content):
+        if self.snapshot_error:
+            content += "\n\nBeads refresh error: %s\nRetrying on the next poll." % self.snapshot_error
+        self.screen.draw(content)
 
     def run(self):
         show_all = False
-        snapshot = self.snapshot_reader()
+        self.refresh_snapshot()
         selected_id = None
         view = "table"
         log_origin = "table"
         while True:
-            issue, blockers = selected_task(snapshot, show_all, selected_id)
+            issue, blockers = selected_task(self.snapshot, show_all, selected_id)
             selected_id = issue_id(issue) if issue else None
             if view == "detail" and issue:
-                self.screen.draw(self.detail_renderer(issue, blockers))
+                self.draw(self.detail_renderer(issue, blockers))
             elif view == "log" and issue:
-                self.screen.draw(self.log_renderer(issue, self.log_reader(issue)))
+                self.draw(self.log_renderer(issue, self.log_reader(issue)))
             else:
-                self.screen.draw(self.renderer(snapshot, show_all, selected_id))
+                self.draw(self.renderer(self.snapshot, show_all, selected_id))
             key = self.screen.getch()
             if self.source_changed():
                 return True
+<<<<<<< HEAD
             if key == ord("q"):
                 return False
+=======
+            if key == curses.ERR:
+                self.refresh_snapshot()
+                self.delay()
+                continue
+            if key == ord("q"):
+                if self.refresh_snapshot():
+                    return False
+                self.delay()
+                continue
+>>>>>>> asco/task-asco-pgj
             if key == 27:
                 if view == "table":
                     return False
@@ -776,19 +804,31 @@ class DashboardController:
                 continue
             if key == ord("c"):
                 if view == "table":
+<<<<<<< HEAD
                     show_all = not show_all
                 continue
             if key == ord("r"):
                 snapshot = self.snapshot_reader()
+=======
+                    if self.refresh_snapshot():
+                        show_all = not show_all
+>>>>>>> asco/task-asco-pgj
                 continue
             if view == "table" and key in (curses.KEY_UP, ord("k"), curses.KEY_DOWN, ord("j")):
-                issues, _ = visible_issues(snapshot, show_all)
+                issues, _ = visible_issues(self.snapshot, show_all)
                 if issues:
                     index = next((i for i, item in enumerate(issues) if issue_id(item) == selected_id), 0)
                     step = -1 if key in (curses.KEY_UP, ord("k")) else 1
                     selected_id = issue_id(issues[max(0, min(len(issues) - 1, index + step))])
                 continue
             if view == "table" and key in (curses.KEY_ENTER, 10, 13, ord("d"), ord("l")):
+<<<<<<< HEAD
+=======
+                if not self.refresh_snapshot():
+                    continue
+                issue, _ = selected_task(self.snapshot, show_all, selected_id)
+                selected_id = issue_id(issue) if issue else None
+>>>>>>> asco/task-asco-pgj
                 if issue:
                     if key == ord("l"):
                         log_origin = view
