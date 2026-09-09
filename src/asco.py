@@ -17,7 +17,6 @@ from pathlib import Path
 
 
 POLL_SECONDS = 3
-DASHBOARD_POLL_SECONDS = 0.25
 METADATA_PREFIX = "asco_"
 DISPATCHER_STOP_SECONDS = 5
 
@@ -686,7 +685,7 @@ def render_dashboard(snapshot, all_closed, selected_id, root):
             lines[index] = "> " + line
         elif index >= 0:
             lines[index] = "  " + line
-    lines.extend(["", "up/down or j/k: select   enter/d: details   l: worker log   c: closed   q: quit"])
+    lines.extend(["", "up/down or j/k: select   enter/d: details   l: worker log   c: closed   r: refresh   q: quit"])
     return "\n".join(lines)
 
 
@@ -740,7 +739,7 @@ def answer_task(root, issue_id_value, text):
 
 
 class DashboardController:
-    def __init__(self, snapshot_reader, renderer, detail_renderer, log_reader, log_renderer, screen, delay,
+    def __init__(self, snapshot_reader, renderer, detail_renderer, log_reader, log_renderer, screen,
                  source_changed=lambda: False):
         self.snapshot_reader = snapshot_reader
         self.renderer = renderer
@@ -748,7 +747,6 @@ class DashboardController:
         self.log_reader = log_reader
         self.log_renderer = log_renderer
         self.screen = screen
-        self.delay = delay
         self.source_changed = source_changed
 
     def run(self):
@@ -769,12 +767,7 @@ class DashboardController:
             key = self.screen.getch()
             if self.source_changed():
                 return True
-            if key == curses.ERR:
-                snapshot = self.snapshot_reader()
-                self.delay()
-                continue
             if key == ord("q"):
-                self.snapshot_reader()
                 return False
             if key == 27:
                 if view == "table":
@@ -784,7 +777,9 @@ class DashboardController:
             if key == ord("c"):
                 if view == "table":
                     show_all = not show_all
-                    snapshot = self.snapshot_reader()
+                continue
+            if key == ord("r"):
+                snapshot = self.snapshot_reader()
                 continue
             if view == "table" and key in (curses.KEY_UP, ord("k"), curses.KEY_DOWN, ord("j")):
                 issues, _ = visible_issues(snapshot, show_all)
@@ -794,9 +789,6 @@ class DashboardController:
                     selected_id = issue_id(issues[max(0, min(len(issues) - 1, index + step))])
                 continue
             if view == "table" and key in (curses.KEY_ENTER, 10, 13, ord("d"), ord("l")):
-                snapshot = self.snapshot_reader()
-                issue, _ = selected_task(snapshot, show_all, selected_id)
-                selected_id = issue_id(issue) if issue else None
                 if issue:
                     if key == ord("l"):
                         log_origin = view
@@ -808,7 +800,6 @@ class DashboardController:
                 log_origin = view
                 view = "log"
                 continue
-            self.delay()
 
 
 class FileChangeDetector:
@@ -858,7 +849,7 @@ def dashboard(root):
 
     def draw(screen):
         curses.curs_set(0)
-        screen.nodelay(True)
+        screen.nodelay(False)
         controller = DashboardController(
             lambda: status_snapshot(root),
             lambda snapshot, show_all, selected_id: render_dashboard(snapshot, show_all, selected_id, root),
@@ -866,7 +857,6 @@ def dashboard(root):
             lambda issue: worker_log_tail(root, issue),
             render_worker_log,
             CursesDashboardScreen(screen, root),
-            lambda: time.sleep(DASHBOARD_POLL_SECONDS),
             source_changed,
         )
         return controller.run()

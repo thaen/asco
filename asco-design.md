@@ -65,35 +65,30 @@ blocking task IDs are shown. The UI calls tasks with stored status `closed`
 Done, shows the most recently closed 10 first, and has an option to view all
 closed tasks.
 
-### Dashboard refresh boundaries
+### Dashboard input boundaries
 
-The dashboard reads a fresh Beads snapshot on every idle poll. Its periodic
-draw loop therefore redraws the active task table, detail view, or worker-log
-view from current task data, while it also redraws the dispatcher log. The
-selected task remains selected when it is visible in the fresh snapshot. When
-it is absent, the dashboard selects the first visible task, or no task when no
-tasks are visible.
+The dashboard waits for a terminal input event rather than running an idle
+poll. It has one Beads snapshot until the user presses `r` to refresh it. The
+selected task remains selected when it is visible in the refreshed snapshot.
+When it is absent, the dashboard selects the first visible task, or no task
+when no task is visible.
 
-The `c` key toggles the closed-item view and obtains a fresh Beads snapshot
-before it draws the new view. The `q` key obtains a fresh Beads snapshot before
-the dashboard exits. These operation-triggered reads are synchronous, so a key
-operation has a defined data boundary. Escape remains a quit alias, but the
-refresh requirement applies specifically to `q` and `c`.
+The `c` key changes the closed-item filter in the current snapshot. The `q`
+key and Escape exit without a Beads read. Navigation, details, and worker-log
+operations also use the current selected task, so they do not wait for a
+refresh. This arrangement gives each operation a direct input-to-output path.
 
-The dashboard code has a controller seam that accepts a snapshot reader, a
-renderer, a screen input/output adapter, and a delay or clock. A scripted fake
-screen can provide keys and record draws, and a sequential fake reader can
-provide snapshots and record reads. Tests must prove one initial read, one
-fresh read for each idle tick and `c`, the resulting closed-item output, and
-one fresh read before `q` exits. A canned isolated Beads project proves that a
-state transition appears without a navigation key. The tests must not need a
-terminal or real sleeps.
+The dashboard controller has a seam that accepts a snapshot reader, renderers,
+and a screen input/output adapter. A scripted fake screen can provide keys and
+record draws, while a sequential fake reader can provide snapshots and record
+reads. Tests must prove that idle error values do not read data, `q` needs only
+the initial read, local operations require no read, and `r` performs one
+refresh. The tests must not need a terminal or real sleeps.
 
-The dashboard also watches its `src/asco.py` source file while it polls for
-input. A changed file returns from the curses wrapper, which restores the
-terminal before the process replaces itself with the updated dashboard command.
-This operation keeps the same terminal session and does not read a new Beads
-snapshot.
+The dashboard checks `src/asco.py` after an input event. A changed file returns
+from the curses wrapper, which restores the terminal before the process
+replaces itself with the updated dashboard command. This operation does not
+read a new Beads snapshot.
 
 It can be a Terminal UI built with Python, tested with Pyte and Pexpect, or it can be a WebUI with no back-end (TamperMonkey is OK if needed). The initial Engineer is empowered to make the implementation decision based on which UI is easier and faster to test, which I suspect is a Terminal UI.
 
