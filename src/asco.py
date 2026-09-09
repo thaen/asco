@@ -219,6 +219,12 @@ class Runner:
         candidate = by_id.get(parent)
         return candidate if candidate and issue_type(candidate) == "epic" else None
 
+    def clear_exit_metadata(self, task):
+        self.bd.run("update", task,
+                    "--unset-metadata", "asco_exited_at",
+                    "--unset-metadata", "asco_exit_state",
+                    "--unset-metadata", "asco_exit_code")
+
     def start(self, issue, issues):
         task = issue_id(issue)
         epic = self.epic_for(issue, issues)
@@ -239,6 +245,7 @@ class Runner:
         claimed = self.bd.run("update", task, "--claim", check=False)
         if claimed.returncode:
             return False
+        self.clear_exit_metadata(task)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         prompt = engineer_prompt(issue, epic, self.root, worktree, branch, log_path)
         log = open(log_path, "a", encoding="utf-8")

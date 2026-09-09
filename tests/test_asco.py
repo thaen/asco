@@ -129,6 +129,18 @@ class AscoTests(unittest.TestCase):
         self.assertIn(("run", "close", "bd-2", "--reason", "The user answered the escalation."), fake.calls)
         self.assertIn(("run", "update", "bd-1", "--status", "open"), fake.calls)
 
+    def test_start_clears_exit_metadata_before_starting_a_retry(self):
+        runner = asco.Runner("/project", 2)
+        calls = []
+        class Result:
+            returncode = 0
+        def run(*args, **kwargs):
+            calls.append(args)
+            return Result()
+        runner.bd.run = run
+        runner.clear_exit_metadata("bd-1")
+        self.assertIn(("update", "bd-1", "--unset-metadata", "asco_exited_at", "--unset-metadata", "asco_exit_state", "--unset-metadata", "asco_exit_code"), calls)
+
 
 if __name__ == "__main__":
     unittest.main()
