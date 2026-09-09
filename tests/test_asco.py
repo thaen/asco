@@ -36,28 +36,26 @@ class AscoTests(unittest.TestCase):
         self.assertEqual(asco.blocking_ids({"blocked_by": [{"depends_on_id": "bd-1"}, "bd-2"]}), ["bd-1", "bd-2"])
 
     @patch.object(asco, "dispatcher_processes", return_value=[])
-    @patch.object(asco, "visible_issues")
     @patch.object(asco, "process_alive", return_value=False)
-    def test_status_uses_done_and_dependency_blocked(self, alive, visible, dispatchers):
-        visible.return_value = ([
+    def test_status_uses_done_and_dependency_blocked(self, alive, dispatchers):
+        snapshot = ([
             {"id": "bd-1", "status": "open", "title": "Wait"},
             {"id": "bd-2", "status": "closed", "title": "Finished"},
         ], {"bd-1": {}})
-        report = asco.render_status("/project")
+        report = asco.render_status(snapshot, root="/project")
         self.assertIn("dependency-blocked", report)
         self.assertIn("Done", report)
         self.assertIn("Assigned", report)
 
     @patch.object(asco, "dispatcher_processes", return_value=[])
-    @patch.object(asco, "visible_issues", return_value=([{"id": "bd-1", "status": "open", "owner": "engineer-1"}], {}))
     @patch.object(asco, "process_alive", return_value=False)
-    def test_status_reports_beads_assignment(self, alive, visible, dispatchers):
-        self.assertIn("engineer-1", asco.render_status("/project"))
+    def test_status_reports_beads_assignment(self, alive, dispatchers):
+        snapshot = ([{"id": "bd-1", "status": "open", "owner": "engineer-1"}], {})
+        self.assertIn("engineer-1", asco.render_status(snapshot, root="/project"))
 
     @patch.object(asco, "dispatcher_processes", return_value=["4144  00:01 python asco.py _serve"])
-    @patch.object(asco, "visible_issues", return_value=([], {}))
-    def test_status_reports_dispatcher_process(self, visible, dispatchers):
-        self.assertIn("Dispatcher: running: 4144", asco.render_status("/project"))
+    def test_status_reports_dispatcher_process(self, dispatchers):
+        self.assertIn("Dispatcher: running: 4144", asco.render_status(([], {}), root="/project"))
 
     def test_log_tail_reads_the_most_recent_lines(self):
         with tempfile.TemporaryDirectory() as root:
