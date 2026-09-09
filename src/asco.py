@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import textwrap
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -411,6 +412,82 @@ def log_tail(root, count=5):
         return []
 
 
+def worker_log_tail(root, issue, count=100):
+    """Return the recent worker output recorded for one task."""
+    task = issue_id(issue)
+    recorded = metadata(issue).get("asco_log")
+    path = Path(recorded) if recorded else task_paths(root, task)[2]
+    if not path.is_absolute():
+        path = Path(root) / path
+    try:
+        with path.open(encoding="utf-8") as log:
+            return log.read().splitlines()[-count:]
+    except FileNotFoundError:
+        return ["No worker output exists for %s." % task]
+    except OSError as error:
+        return ["Could not read the worker log: %s" % error]
+
+
+def selected_task(snapshot, all_closed, selected_id):
+    issues, blocked = visible_issues(snapshot, all_closed)
+    for issue in issues:
+        if issue_id(issue) == selected_id:
+            return issue, blocked
+    return (issues[0], blocked) if issues else (None, blocked)
+
+
+def render_dashboard(snapshot, all_closed, selected_id, root):
+    report = render_status(snapshot, all_closed, root)
+    lines = report.splitlines()
+    for index, line in enumerate(lines):
+        if selected_id and line.startswith(selected_id + " "):
+            lines[index] = "> " + line
+        elif index >= 0:
+            lines[index] = "  " + line
+    lines.extend(["", "up/down or j/k: select   enter/d: details   l: worker log   c: closed   q: quit"])
+    return "\n".join(lines)
+
+
+def render_task_detail(issue, blockers):
+    task = issue_id(issue)
+    record = metadata(issue)
+    assigned = issue.get("assignee") or issue.get("owner") or "unassigned"
+    blocker_ids = blocking_ids(blockers.get(task, issue))
+    description = issue.get("description") or "No description was provided."
+    description_lines = []
+    for paragraph in description.splitlines() or [""]:
+        description_lines.extend(textwrap.wrap(paragraph, width=78) or [""])
+    lines = [
+        "Task details: %s" % task,
+        "Title: %s" % issue.get("title", ""),
+        "Status: %s" % issue.get("status", "unknown"),
+        "Assigned: %s" % assigned,
+        "",
+        "Description:",
+        *description_lines,
+        "",
+        "Blockers:",
+    ]
+    lines.extend(["- " + blocker for blocker in blocker_ids] or ["None."])
+    lines.extend([
+        "",
+        "Worker log: %s" % record.get("asco_log", task_paths(".", task)[2]),
+        "",
+        "l: open worker log   escape: return to task table   q: quit",
+    ])
+    return "\n".join(lines)
+
+
+def render_worker_log(issue, lines):
+    return "\n".join([
+        "Worker log: %s" % issue_id(issue),
+        "",
+        *lines,
+        "",
+        "escape: return to task details   q: quit",
+    ])
+
+
 def answer_task(root, issue_id_value, text):
     bd = Beads(root)
     task = bd.show(issue_id_value)
@@ -421,26 +498,59 @@ def answer_task(root, issue_id_value, text):
 
 
 class DashboardController:
-    def __init__(self, snapshot_reader, renderer, screen, delay):
+    def __init__(self, snapshot_reader, renderer, detail_renderer, log_reader, log_renderer, screen, delay):
         self.snapshot_reader = snapshot_reader
         self.renderer = renderer
+        self.detail_renderer = detail_renderer
+        self.log_reader = log_reader
+        self.log_renderer = log_renderer
         self.screen = screen
         self.delay = delay
 
     def run(self):
         show_all = False
         snapshot = self.snapshot_reader()
+        selected_id = None
+        view = "table"
         while True:
-            self.screen.draw(self.renderer(snapshot, show_all))
+            issue, blockers = selected_task(snapshot, show_all, selected_id)
+            selected_id = issue_id(issue) if issue else None
+            if view == "detail" and issue:
+                self.screen.draw(self.detail_renderer(issue, blockers))
+            elif view == "log" and issue:
+                self.screen.draw(self.log_renderer(issue, self.log_reader(issue)))
+            else:
+                self.screen.draw(self.renderer(snapshot, show_all, selected_id))
             key = self.screen.getch()
             if key == ord("q"):
                 self.snapshot_reader()
                 return
             if key == 27:
-                return
+                if view == "table":
+                    return
+                view = "detail" if view == "log" else "table"
+                continue
             if key == ord("c"):
-                show_all = not show_all
+                if view == "table":
+                    show_all = not show_all
+                    snapshot = self.snapshot_reader()
+                continue
+            if view == "table" and key in (curses.KEY_UP, ord("k"), curses.KEY_DOWN, ord("j")):
+                issues, _ = visible_issues(snapshot, show_all)
+                if issues:
+                    index = next((i for i, item in enumerate(issues) if issue_id(item) == selected_id), 0)
+                    step = -1 if key in (curses.KEY_UP, ord("k")) else 1
+                    selected_id = issue_id(issues[max(0, min(len(issues) - 1, index + step))])
+                continue
+            if view == "table" and key in (curses.KEY_ENTER, 10, 13, ord("d"), ord("l")):
                 snapshot = self.snapshot_reader()
+                issue, _ = selected_task(snapshot, show_all, selected_id)
+                selected_id = issue_id(issue) if issue else None
+                if issue:
+                    view = "log" if key == ord("l") else "detail"
+                continue
+            if view == "detail" and key == ord("l"):
+                view = "log"
                 continue
             self.delay()
 
@@ -465,7 +575,6 @@ class CursesDashboardScreen:
             for row, line in enumerate(lines, start=2):
                 if row < curses.LINES - 1:
                     self.screen.addnstr(row, split + 2, line, curses.COLS - split - 3)
-        self.screen.addnstr(curses.LINES - 1, 0, "q: quit   c: toggle all closed", curses.COLS - 1)
         self.screen.refresh()
 
     def getch(self):
@@ -478,7 +587,10 @@ def dashboard(root):
         screen.nodelay(True)
         controller = DashboardController(
             lambda: status_snapshot(root),
-            lambda snapshot, show_all: render_status(snapshot, show_all, root),
+            lambda snapshot, show_all, selected_id: render_dashboard(snapshot, show_all, selected_id, root),
+            render_task_detail,
+            lambda issue: worker_log_tail(root, issue),
+            render_worker_log,
             CursesDashboardScreen(screen, root),
             lambda: time.sleep(0.25),
         )
