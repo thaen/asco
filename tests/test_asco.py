@@ -1,4 +1,5 @@
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -57,6 +58,13 @@ class AscoTests(unittest.TestCase):
     @patch.object(asco, "visible_issues", return_value=([], {}))
     def test_status_reports_dispatcher_process(self, visible, dispatchers):
         self.assertIn("Dispatcher: running: 4144", asco.render_status("/project"))
+
+    def test_log_tail_reads_the_most_recent_lines(self):
+        with tempfile.TemporaryDirectory() as root:
+            log = Path(root) / ".asco/logs/runner.log"
+            log.parent.mkdir(parents=True)
+            log.write_text("one\ntwo\nthree\n", encoding="utf-8")
+            self.assertEqual(asco.log_tail(root, 2), ["two", "three"])
 
     def test_engineer_prompt_names_commit_and_escalation_rules(self):
         prompt = asco.engineer_prompt({"id": "bd-2", "title": "Implement", "description": "Build it"},

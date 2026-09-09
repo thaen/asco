@@ -187,6 +187,7 @@ class Runner:
         self.parallel = parallel
         self.bd = Beads(self.root)
         self.workers = {}
+        self.last_queue_summary = None
 
     def ensure_escalation_type(self):
         configured = self.bd.run("config", "get", "types.custom", check=False)
@@ -347,12 +348,17 @@ class Runner:
         if capacity <= 0:
             return
         current = self.bd.all()
-        for issue in self.bd.ready():
+        ready = self.bd.ready()
+        dispatchable = [issue for issue in ready if issue_type(issue) == "epic" or self.epic_for(issue, current)]
+        summary = "ready=%s dispatchable=%s active_workers=%s" % (len(ready), len(dispatchable), self.worker_count())
+        if summary != self.last_queue_summary:
+            print("asco: " + summary, flush=True)
+            self.last_queue_summary = summary
+        for issue in dispatchable:
             if capacity <= 0:
                 break
-            if issue_type(issue) == "epic" or self.epic_for(issue, current):
-                if self.start(issue, current):
-                    capacity -= 1
+            if self.start(issue, current):
+                capacity -= 1
 
     def serve(self):
         self.ensure_escalation_type()
@@ -395,6 +401,15 @@ def render_status(root, all_closed=False):
     return "\n".join(lines)
 
 
+def log_tail(root, count=5):
+    path = Path(root) / ".asco" / "logs" / "runner.log"
+    try:
+        with path.open(encoding="utf-8") as log:
+            return log.read().splitlines()[-count:]
+    except FileNotFoundError:
+        return []
+
+
 def dashboard(root):
     show_all = [False]
     def draw(screen):
@@ -402,9 +417,19 @@ def dashboard(root):
         screen.nodelay(True)
         while True:
             screen.erase()
+            split = max(45, int(curses.COLS * 0.62))
             for row, line in enumerate(render_status(root, show_all[0]).splitlines()):
                 if row < curses.LINES - 1:
-                    screen.addnstr(row, 0, line, curses.COLS - 1)
+                    screen.addnstr(row, 0, line, split - 1)
+            if split < curses.COLS - 15:
+                screen.vline(0, split, curses.ACS_VLINE, curses.LINES - 1)
+                screen.addnstr(0, split + 2, "Dispatcher log", curses.COLS - split - 3)
+                lines = log_tail(root)
+                if not lines:
+                    lines = ["No dispatcher output yet."]
+                for row, line in enumerate(lines, start=2):
+                    if row < curses.LINES - 1:
+                        screen.addnstr(row, split + 2, line, curses.COLS - split - 3)
             screen.addnstr(curses.LINES - 1, 0, "q: quit   c: toggle all closed", curses.COLS - 1)
             screen.refresh()
             key = screen.getch()
