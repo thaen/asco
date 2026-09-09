@@ -377,17 +377,20 @@ def render_status(root, all_closed=False):
     issues, blocked = visible_issues(root, all_closed)
     dispatchers = dispatcher_processes(root)
     dispatcher = "running: " + "; ".join(dispatchers) if dispatchers else "not running"
-    lines = ["ASCO task status", "Dispatcher: " + dispatcher, ""]
+    lines = ["ASCO task status", "Dispatcher: " + dispatcher, "",
+             "Task             Status                Assigned             Worker       Title"]
     for issue in issues:
         task = issue_id(issue)
         status = "Done" if issue.get("status") == "closed" else issue.get("status", "unknown")
         if task in blocked and issue.get("status") == "open":
             status = "dependency-blocked"
         record = metadata(issue)
+        assigned = issue.get("assignee") or issue.get("owner") or "unassigned"
         worker = "running pid %s" % record.get("asco_pid") if process_alive(record.get("asco_pid")) else ""
         blockers = ", ".join(blocking_ids(blocked.get(task, issue)))
         suffix = " [blocked by %s]" % blockers if blockers else ""
-        lines.append("%-16s %-21s %-12s %s%s" % (task, status, worker, issue.get("title", ""), suffix))
+        lines.append("%-16s %-21s %-20.20s %-12s %s%s" %
+                     (task, status, assigned, worker, issue.get("title", ""), suffix))
     lines.extend(["", "Use `asco answer ESCALATION_ID \"answer\"` to answer an escalation."])
     return "\n".join(lines)
 

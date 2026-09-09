@@ -45,6 +45,13 @@ class AscoTests(unittest.TestCase):
         report = asco.render_status("/project")
         self.assertIn("dependency-blocked", report)
         self.assertIn("Done", report)
+        self.assertIn("Assigned", report)
+
+    @patch.object(asco, "dispatcher_processes", return_value=[])
+    @patch.object(asco, "visible_issues", return_value=([{"id": "bd-1", "status": "open", "owner": "engineer-1"}], {}))
+    @patch.object(asco, "process_alive", return_value=False)
+    def test_status_reports_beads_assignment(self, alive, visible, dispatchers):
+        self.assertIn("engineer-1", asco.render_status("/project"))
 
     @patch.object(asco, "dispatcher_processes", return_value=["4144  00:01 python asco.py _serve"])
     @patch.object(asco, "visible_issues", return_value=([], {}))
