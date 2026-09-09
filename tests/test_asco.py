@@ -151,14 +151,21 @@ class AscoTests(unittest.TestCase):
             {"id": "bd-2", "status": "open", "title": "Second"},
         ], {})
         screen, reader, delays = self.run_dashboard(
-            [ord("j"), ord("l"), 27, 27, ord("q")], [initial, fresh, "quit refresh"]
+            [ord("j"), ord("l"), 27, ord("q")], [initial, fresh, "quit refresh"]
         )
         self.assertEqual(reader.calls, [initial, fresh, "quit refresh"])
         self.assertIn("Worker log: bd-2", screen.drawn[2])
         self.assertIn("log bd-2", screen.drawn[2])
-        self.assertIn("Task details: bd-2", screen.drawn[3])
-        self.assertEqual(screen.drawn[4], "%s all_closed=False selected=bd-2" % (fresh,))
+        self.assertEqual(screen.drawn[3], "%s all_closed=False selected=bd-2" % (fresh,))
         self.assertEqual(delays, [])
+
+    def test_worker_log_tail_reports_a_missing_worker_log(self):
+        with tempfile.TemporaryDirectory() as root:
+            issue = {"id": "bd-2", "metadata": {"asco_log": ".asco/logs/bd-2.log"}}
+            self.assertEqual(
+                asco.worker_log_tail(root, issue),
+                ["No worker output exists for bd-2."],
+            )
 
     def test_task_paths_are_under_common_state_directory(self):
         worktree, branch, log = asco.task_paths("/project", "bd-42")
