@@ -180,7 +180,7 @@ The feature Epic is {parent or task}. Its original request is:
 
 Use Beads for durable communication. Read comments before work and add a concise handoff comment when the task is complete. Make only the changes this task requires. Commit every repository change on this branch before closing the task. Do not merge your branch into the Epic integration branch; Asco performs that merge before dependent work begins. Do not close a task with uncommitted changes.
 
-If a decision needs a user answer, create a blocked Beads task of type escalation under Epic {parent or task}; state the question, options, and the consequence of each option. If a new task belongs to this feature, create it with --parent {parent or task}, add required blocks dependencies, and describe its relationship in a comment.
+If a decision needs a user answer, first set this task to blocked. Create a blocked Beads task of type escalation under Epic {parent or task}; state the question, options, and the consequence of each option. Set the escalation metadata `asco_blocked_task={task}`. The `asco answer` command closes the escalation and reopens that blocked task. If a new task belongs to this feature, create it with --parent {parent or task}, add required blocks dependencies, and describe its relationship in a comment.
 
 For an Epic decomposition task, create child tasks for high-level tests, implementation, test, audit, and merge as the work requires. Use blocks dependencies in the required order. The merge task must block on every task whose branch it integrates. Include this original request in the audit task. The Epic remains in progress while its children run.
 
@@ -231,7 +231,7 @@ class Runner:
             integration = metadata(epic).get("asco_worktree")
             integration_branch = metadata(epic).get("asco_branch")
             if not integration or not integration_branch:
-                self.escalate(task, "The parent Epic has no integration worktree record.")
+                self.escalate(task, "The parent Epic has no integration worktree record.", blocked_task=task)
                 return False
             worktree, branch, log_path = task_paths(self.root, task, issue_id(epic))
             make_worktree(self.root, worktree, branch, integration_branch)
@@ -257,7 +257,7 @@ class Runner:
         self.bd.comment(task, "Asco started Engineer PID %s in %s." % (child.pid, branch))
         return True
 
-    def escalate(self, source, reason):
+    def escalate(self, source, reason, blocked_task=None):
         title = "Asco escalation for %s" % source
         for issue in self.bd.all():
             if issue.get("status") == "closed":
@@ -265,15 +265,26 @@ class Runner:
             record = metadata(issue)
             if record.get("asco_source") == source or issue.get("title") == title:
                 return
-        result = self.bd.run("create", title, "--type", "escalation",
-                             "--description", reason, "--silent", check=False)
+        source_issue = self.bd.show(source)
+        args = ["create", title, "--type", "escalation", "--description", reason, "--silent"]
+        if parent_id(source_issue):
+            args.extend(["--parent", parent_id(source_issue)])
+        result = self.bd.run(*args, check=False)
         if result.returncode:
-            result = self.bd.run("create", title, "--type", "task",
-                                 "--add-label", "escalation", "--description", reason, "--silent")
+            args[args.index("escalation")] = "task"
+            args.extend(["--add-label", "escalation"])
+            result = self.bd.run(*args)
         escalation = result.stdout.strip()
         self.bd.run("update", escalation, "--status", "blocked")
-        self.bd.update_metadata(escalation, source=source)
+        values = {"source": source}
+        if blocked_task:
+            self.bd.run("update", blocked_task, "--status", "blocked")
+            values["blocked_task"] = blocked_task
+        self.bd.update_metadata(escalation, **values)
         self.bd.comment(source, "Asco escalated: %s" % reason)
+
+    def recover_unfinished_task(self, task, record):
+        self.escalate(task, "Engineer process exited while this task remained in progress. Review %s and choose whether to retry the task." % record.get("asco_log", "the worker log"), blocked_task=task)
 
     def reap(self, issues):
         for issue in issues:
@@ -286,11 +297,11 @@ class Runner:
                 self.workers.pop(task, None)
                 self.bd.update_metadata(task, exited_at=stamp(), exit_state="exited", exit_code=exit_code)
                 if issue.get("status") == "in_progress":
-                    self.bd.comment(issue_id(issue), "Engineer process exited while the task remains in progress. Review %s." % record.get("asco_log", "the worker log"))
+                    self.recover_unfinished_task(task, record)
             elif pid and not process_alive(pid) and not record.get("asco_exited_at"):
                 self.bd.update_metadata(task, exited_at=stamp(), exit_state="unknown-after-restart")
                 if issue.get("status") == "in_progress":
-                    self.bd.comment(task, "Engineer process is no longer present while the task remains in progress. Review %s." % record.get("asco_log", "the worker log"))
+                    self.recover_unfinished_task(task, record)
 
     def integrate(self, issues):
         for issue in issues:
@@ -426,6 +437,18 @@ def log_tail(root, count=5):
         return []
 
 
+def answer_escalation(root, issue_id_value, text):
+    bd = Beads(root)
+    escalation = bd.show(issue_id_value)
+    blocked_task = metadata(escalation).get("asco_blocked_task")
+    if not blocked_task:
+        raise CommandError("%s has no asco_blocked_task metadata" % issue_id_value)
+    bd.comment(issue_id_value, "User answer: %s" % text)
+    bd.run("close", issue_id_value, "--reason", "The user answered the escalation.")
+    bd.run("update", blocked_task, "--status", "open")
+    bd.comment(blocked_task, "The user answered escalation %s: %s" % (issue_id_value, text))
+
+
 def dashboard(root):
     show_all = [False]
     def draw(screen):
@@ -490,9 +513,8 @@ def main(argv=None):
     elif args.command == "dashboard":
         dashboard(root)
     else:
-        Beads(root).comment(args.issue, "User answer: %s" % args.text)
-        Beads(root).run("update", args.issue, "--status", "open")
-        print("The answer was recorded and the escalation is open for an Engineer.")
+        answer_escalation(root, args.issue, args.text)
+        print("The answer was recorded, the escalation closed, and its blocked task reopened.")
 
 
 if __name__ == "__main__":

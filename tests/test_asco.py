@@ -91,6 +91,7 @@ class AscoTests(unittest.TestCase):
                                       Path(__file__).parents[1] / ".asco/logs/bd-2.log")
         self.assertIn("Commit every repository change", prompt)
         self.assertIn("type escalation", prompt)
+        self.assertIn("asco_blocked_task=bd-2", prompt)
         self.assertIn("--parent bd-1", prompt)
 
     @patch.object(asco, "process_alive", return_value=True)
@@ -111,6 +112,22 @@ class AscoTests(unittest.TestCase):
         runner.bd.run = run
         runner.ensure_escalation_type()
         self.assertIn(("config", "set", "types.custom", "review,gate,escalation"), calls)
+
+    def test_answer_reopens_the_blocked_task_and_closes_escalation(self):
+        class FakeBeads:
+            def __init__(self, root):
+                self.calls = []
+            def show(self, issue):
+                return {"metadata": {"asco_blocked_task": "bd-1"}}
+            def comment(self, *args):
+                self.calls.append(("comment",) + args)
+            def run(self, *args):
+                self.calls.append(("run",) + args)
+        fake = FakeBeads("/project")
+        with patch.object(asco, "Beads", return_value=fake):
+            asco.answer_escalation("/project", "bd-2", "Retry it.")
+        self.assertIn(("run", "close", "bd-2", "--reason", "The user answered the escalation."), fake.calls)
+        self.assertIn(("run", "update", "bd-1", "--status", "open"), fake.calls)
 
 
 if __name__ == "__main__":
