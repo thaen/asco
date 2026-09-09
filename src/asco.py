@@ -725,7 +725,7 @@ def render_worker_log(issue, lines):
         "",
         *lines,
         "",
-        "escape: return to task details   q: quit",
+        "escape: return to previous view   q: quit",
     ])
 
 
@@ -755,6 +755,7 @@ class DashboardController:
         snapshot = self.snapshot_reader()
         selected_id = None
         view = "table"
+        log_origin = "table"
         while True:
             issue, blockers = selected_task(snapshot, show_all, selected_id)
             selected_id = issue_id(issue) if issue else None
@@ -773,7 +774,7 @@ class DashboardController:
             if key == 27:
                 if view == "table":
                     return False
-                view = "detail" if view == "log" else "table"
+                view = log_origin if view == "log" else "table"
                 continue
             if key == ord("c"):
                 if view == "table":
@@ -792,9 +793,14 @@ class DashboardController:
                 issue, _ = selected_task(snapshot, show_all, selected_id)
                 selected_id = issue_id(issue) if issue else None
                 if issue:
-                    view = "log" if key == ord("l") else "detail"
+                    if key == ord("l"):
+                        log_origin = view
+                        view = "log"
+                    else:
+                        view = "detail"
                 continue
             if view == "detail" and key == ord("l"):
+                log_origin = view
                 view = "log"
                 continue
             self.delay()
