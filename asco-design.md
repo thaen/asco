@@ -49,6 +49,27 @@ blocking task IDs are shown. The UI calls tasks with stored status `closed`
 Done, shows the most recently closed 10 first, and has an option to view all
 closed tasks.
 
+### Dashboard refresh boundaries
+
+The dashboard has one cached Beads snapshot while it is idle. Its periodic
+draw loop may repaint that snapshot and the dispatcher log, but it does not
+read Beads again. Data can therefore be stale until the user begins an
+operation.
+
+The `c` key toggles the closed-item view and obtains a fresh Beads snapshot
+before it draws the new view. The `q` key obtains a fresh Beads snapshot before
+the dashboard exits. These operation-triggered reads are synchronous, so a key
+operation has a defined data boundary. Escape remains a quit alias, but the
+refresh requirement applies specifically to `q` and `c`.
+
+The dashboard code has a controller seam that accepts a snapshot reader, a
+renderer, a screen input/output adapter, and a delay or clock. A scripted fake
+screen can provide keys and record draws, and a sequential fake reader can
+provide snapshots and record reads. Tests must prove one initial read, no
+additional reads during idle ticks, one fresh read for each `c`, the resulting
+closed-item output, and one fresh read before `q` exits. The tests must not
+need a terminal, real sleeps, or a Beads database.
+
 It can be a Terminal UI built with Python, tested with Pyte and Pexpect, or it can be a WebUI with no back-end (TamperMonkey is OK if needed). The initial Engineer is empowered to make the implementation decision based on which UI is easier and faster to test, which I suspect is a Terminal UI.
 
 ## Beads interaction

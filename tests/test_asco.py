@@ -10,7 +10,71 @@ asco = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(asco)
 
 
+class ScriptedDashboardScreen:
+    def __init__(self, keys):
+        self.keys = list(keys)
+        self.drawn = []
+
+    def draw(self, status):
+        self.drawn.append(status)
+
+    def getch(self):
+        return self.keys.pop(0)
+
+
+class SnapshotReader:
+    def __init__(self, snapshots):
+        self.snapshots = list(snapshots)
+        self.calls = []
+
+    def __call__(self):
+        snapshot = self.snapshots.pop(0)
+        self.calls.append(snapshot)
+        return snapshot
+
+
 class AscoTests(unittest.TestCase):
+    def run_dashboard(self, keys, snapshots):
+        screen = ScriptedDashboardScreen(keys)
+        reader = SnapshotReader(snapshots)
+        delays = []
+        controller = asco.DashboardController(
+            reader,
+            lambda snapshot, show_all: "%s all_closed=%s" % (snapshot, show_all),
+            screen,
+            lambda: delays.append(None),
+        )
+        controller.run()
+        return screen, reader, delays
+
+    def test_dashboard_quit_reads_a_fresh_snapshot_before_exit(self):
+        screen, reader, delays = self.run_dashboard(
+            [ord("q")], ["initial", "quit refresh"]
+        )
+        self.assertEqual(reader.calls, ["initial", "quit refresh"])
+        self.assertEqual(screen.drawn, ["initial all_closed=False"])
+        self.assertEqual(delays, [])
+
+    def test_dashboard_idle_ticks_keep_the_initial_snapshot(self):
+        screen, reader, delays = self.run_dashboard(
+            [-1, -1, ord("q")], ["initial", "quit refresh"]
+        )
+        self.assertEqual(reader.calls, ["initial", "quit refresh"])
+        self.assertEqual(screen.drawn, ["initial all_closed=False"] * 3)
+        self.assertEqual(delays, [None, None])
+
+    def test_dashboard_closed_toggle_refreshes_and_draws_changed_view(self):
+        screen, reader, delays = self.run_dashboard(
+            [ord("c"), ord("q")],
+            ["recent closed items", "all closed items", "quit refresh"],
+        )
+        self.assertEqual(reader.calls, ["recent closed items", "all closed items", "quit refresh"])
+        self.assertEqual(screen.drawn, [
+            "recent closed items all_closed=False",
+            "all closed items all_closed=True",
+        ])
+        self.assertEqual(delays, [])
+
     def test_task_paths_are_under_common_state_directory(self):
         worktree, branch, log = asco.task_paths("/project", "bd-42", "bd-1")
         self.assertEqual(worktree, Path("/project/.asco/worktrees/tasks/bd-42"))
@@ -52,23 +116,22 @@ class AscoTests(unittest.TestCase):
         self.assertFalse(asco.is_escalation({"issue_type": "task"}))
 
     @patch.object(asco, "dispatcher_processes", return_value=[])
-    @patch.object(asco, "visible_issues")
     @patch.object(asco, "process_alive", return_value=False)
-    def test_status_uses_done_and_dependency_blocked(self, alive, visible, dispatchers):
-        visible.return_value = ([
+    def test_status_uses_done_and_dependency_blocked(self, alive, dispatchers):
+        snapshot = ([
             {"id": "bd-1", "status": "open", "title": "Wait"},
             {"id": "bd-2", "status": "closed", "title": "Finished"},
         ], {"bd-1": {}})
-        report = asco.render_status("/project")
+        report = asco.render_status(snapshot, root="/project")
         self.assertIn("dependency-blocked", report)
         self.assertIn("Done", report)
         self.assertIn("Assigned", report)
 
     @patch.object(asco, "dispatcher_processes", return_value=[])
-    @patch.object(asco, "visible_issues", return_value=([{"id": "bd-1", "status": "open", "owner": "engineer-1"}], {}))
     @patch.object(asco, "process_alive", return_value=False)
-    def test_status_reports_beads_assignment(self, alive, visible, dispatchers):
-        self.assertIn("engineer-1", asco.render_status("/project"))
+    def test_status_reports_beads_assignment(self, alive, dispatchers):
+        snapshot = ([{"id": "bd-1", "status": "open", "owner": "engineer-1"}], {})
+        self.assertIn("engineer-1", asco.render_status(snapshot, root="/project"))
 
     @patch.object(asco, "dispatcher_processes", return_value=[])
     @patch.object(asco, "visible_issues", return_value=([{"id": "bd-1", "status": "blocked", "issue_type": "escalation", "title": "Need a choice", "description": "Choose A or B."}], {}))
@@ -79,9 +142,8 @@ class AscoTests(unittest.TestCase):
         self.assertIn("Choose A or B.", report)
 
     @patch.object(asco, "dispatcher_processes", return_value=["4144  00:01 python asco.py _serve"])
-    @patch.object(asco, "visible_issues", return_value=([], {}))
-    def test_status_reports_dispatcher_process(self, visible, dispatchers):
-        self.assertIn("Dispatcher: running: 4144", asco.render_status("/project"))
+    def test_status_reports_dispatcher_process(self, dispatchers):
+        self.assertIn("Dispatcher: running: 4144", asco.render_status(([], {}), root="/project"))
 
     def test_log_tail_reads_the_most_recent_lines(self):
         with tempfile.TemporaryDirectory() as root:

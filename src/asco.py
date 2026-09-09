@@ -401,17 +401,22 @@ class Runner:
             time.sleep(POLL_SECONDS)
 
 
-def visible_issues(root, all_closed=False):
+def status_snapshot(root):
     bd = Beads(root)
     issues = bd.all()
     blocked = {issue_id(item): item for item in bd.json("blocked")}
+    return issues, blocked
+
+
+def visible_issues(snapshot, all_closed=False):
+    issues, blocked = snapshot
     open_issues = [item for item in issues if item.get("status") != "closed"]
     closed = sorted((item for item in issues if item.get("status") == "closed"), key=lambda item: item.get("closed_at") or "", reverse=True)
     return open_issues + (closed if all_closed else closed[:10]), blocked
 
 
-def render_status(root, all_closed=False):
-    issues, blocked = visible_issues(root, all_closed)
+def render_status(snapshot, all_closed=False, root=None):
+    issues, blocked = visible_issues(snapshot, all_closed)
     dispatchers = dispatcher_processes(root)
     dispatcher = "running: " + "; ".join(dispatchers) if dispatchers else "not running"
     lines = ["ASCO task status", "Dispatcher: " + dispatcher, ""]
@@ -460,34 +465,69 @@ def answer_escalation(root, issue_id_value, text):
     bd.comment(blocked_task, "The user answered escalation %s: %s" % (issue_id_value, text))
 
 
+class DashboardController:
+    def __init__(self, snapshot_reader, renderer, screen, delay):
+        self.snapshot_reader = snapshot_reader
+        self.renderer = renderer
+        self.screen = screen
+        self.delay = delay
+
+    def run(self):
+        show_all = False
+        snapshot = self.snapshot_reader()
+        while True:
+            self.screen.draw(self.renderer(snapshot, show_all))
+            key = self.screen.getch()
+            if key == ord("q"):
+                self.snapshot_reader()
+                return
+            if key == 27:
+                return
+            if key == ord("c"):
+                show_all = not show_all
+                snapshot = self.snapshot_reader()
+                continue
+            self.delay()
+
+
+class CursesDashboardScreen:
+    def __init__(self, screen, root):
+        self.screen = screen
+        self.root = root
+
+    def draw(self, status):
+        self.screen.erase()
+        split = max(45, int(curses.COLS * 0.62))
+        for row, line in enumerate(status.splitlines()):
+            if row < curses.LINES - 1:
+                self.screen.addnstr(row, 0, line, split - 1)
+        if split < curses.COLS - 15:
+            self.screen.vline(0, split, curses.ACS_VLINE, curses.LINES - 1)
+            self.screen.addnstr(0, split + 2, "Dispatcher log", curses.COLS - split - 3)
+            lines = log_tail(self.root)
+            if not lines:
+                lines = ["No dispatcher output yet."]
+            for row, line in enumerate(lines, start=2):
+                if row < curses.LINES - 1:
+                    self.screen.addnstr(row, split + 2, line, curses.COLS - split - 3)
+        self.screen.addnstr(curses.LINES - 1, 0, "q: quit   c: toggle all closed", curses.COLS - 1)
+        self.screen.refresh()
+
+    def getch(self):
+        return self.screen.getch()
+
+
 def dashboard(root):
-    show_all = [False]
     def draw(screen):
         curses.curs_set(0)
         screen.nodelay(True)
-        while True:
-            screen.erase()
-            split = max(45, int(curses.COLS * 0.62))
-            for row, line in enumerate(render_status(root, show_all[0]).splitlines()):
-                if row < curses.LINES - 1:
-                    screen.addnstr(row, 0, line, split - 1)
-            if split < curses.COLS - 15:
-                screen.vline(0, split, curses.ACS_VLINE, curses.LINES - 1)
-                screen.addnstr(0, split + 2, "Dispatcher log", curses.COLS - split - 3)
-                lines = log_tail(root)
-                if not lines:
-                    lines = ["No dispatcher output yet."]
-                for row, line in enumerate(lines, start=2):
-                    if row < curses.LINES - 1:
-                        screen.addnstr(row, split + 2, line, curses.COLS - split - 3)
-            screen.addnstr(curses.LINES - 1, 0, "q: quit   c: toggle all closed", curses.COLS - 1)
-            screen.refresh()
-            key = screen.getch()
-            if key in (ord("q"), 27):
-                return
-            if key == ord("c"):
-                show_all[0] = not show_all[0]
-            time.sleep(0.25)
+        controller = DashboardController(
+            lambda: status_snapshot(root),
+            lambda snapshot, show_all: render_status(snapshot, show_all, root),
+            CursesDashboardScreen(screen, root),
+            lambda: time.sleep(0.25),
+        )
+        controller.run()
     curses.wrapper(draw)
 
 
@@ -520,7 +560,7 @@ def main(argv=None):
     elif args.command == "_serve":
         Runner(root, args.parallel).serve()
     elif args.command == "status":
-        print(render_status(root, args.all_closed))
+        print(render_status(status_snapshot(root), args.all_closed, root))
     elif args.command == "dashboard":
         dashboard(root)
     else:
