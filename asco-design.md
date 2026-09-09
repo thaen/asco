@@ -69,6 +69,12 @@ additional reads during idle ticks, one fresh read for each `c`, the resulting
 closed-item output, and one fresh read before `q` exits. The tests must not
 need a terminal, real sleeps, or a Beads database.
 
+The dashboard also watches its `src/asco.py` source file while it polls for
+input. A changed file returns from the curses wrapper, which restores the
+terminal before the process replaces itself with the updated dashboard command.
+This operation keeps the same terminal session and does not read a new Beads
+snapshot.
+
 It can be a Terminal UI built with Python, tested with Pyte and Pexpect, or it can be a WebUI with no back-end (TamperMonkey is OK if needed). The initial Engineer is empowered to make the implementation decision based on which UI is easier and faster to test, which I suspect is a Terminal UI.
 
 ## Beads interaction

@@ -47,6 +47,30 @@ class AscoTests(unittest.TestCase):
         controller.run()
         return screen, reader, delays
 
+    def test_dashboard_reloads_after_the_source_changes(self):
+        screen = ScriptedDashboardScreen([-1])
+        reader = SnapshotReader(["initial"])
+        changes = [True]
+        controller = asco.DashboardController(
+            reader,
+            lambda snapshot, show_all: "%s all_closed=%s" % (snapshot, show_all),
+            screen,
+            lambda: self.fail("The controller must not sleep before it reloads."),
+            lambda: changes.pop(0),
+        )
+        self.assertTrue(controller.run())
+        self.assertEqual(reader.calls, ["initial"])
+        self.assertEqual(screen.drawn, ["initial all_closed=False"])
+
+    def test_file_change_detector_notices_a_source_update(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "asco.py"
+            source.write_text("first", encoding="utf-8")
+            detector = asco.FileChangeDetector(source)
+            self.assertFalse(detector())
+            source.write_text("second", encoding="utf-8")
+            self.assertTrue(detector())
+
     def test_dashboard_quit_reads_a_fresh_snapshot_before_exit(self):
         screen, reader, delays = self.run_dashboard(
             [ord("q")], ["initial", "quit refresh"]

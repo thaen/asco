@@ -421,11 +421,12 @@ def answer_task(root, issue_id_value, text):
 
 
 class DashboardController:
-    def __init__(self, snapshot_reader, renderer, screen, delay):
+    def __init__(self, snapshot_reader, renderer, screen, delay, source_changed=lambda: False):
         self.snapshot_reader = snapshot_reader
         self.renderer = renderer
         self.screen = screen
         self.delay = delay
+        self.source_changed = source_changed
 
     def run(self):
         show_all = False
@@ -433,16 +434,34 @@ class DashboardController:
         while True:
             self.screen.draw(self.renderer(snapshot, show_all))
             key = self.screen.getch()
+            if self.source_changed():
+                return True
             if key == ord("q"):
                 self.snapshot_reader()
-                return
+                return False
             if key == 27:
-                return
+                return False
             if key == ord("c"):
                 show_all = not show_all
                 snapshot = self.snapshot_reader()
                 continue
             self.delay()
+
+
+class FileChangeDetector:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.marker = self.read_marker()
+
+    def read_marker(self):
+        try:
+            stat = self.path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_mtime_ns, stat.st_size, stat.st_ino
+
+    def __call__(self):
+        return self.read_marker() != self.marker
 
 
 class CursesDashboardScreen:
@@ -473,6 +492,8 @@ class CursesDashboardScreen:
 
 
 def dashboard(root):
+    source_changed = FileChangeDetector(Path(__file__))
+
     def draw(screen):
         curses.curs_set(0)
         screen.nodelay(True)
@@ -481,9 +502,13 @@ def dashboard(root):
             lambda snapshot, show_all: render_status(snapshot, show_all, root),
             CursesDashboardScreen(screen, root),
             lambda: time.sleep(0.25),
+            source_changed,
         )
-        controller.run()
-    curses.wrapper(draw)
+        return controller.run()
+
+    if curses.wrapper(draw):
+        script = str(Path(__file__).resolve())
+        os.execv(sys.executable, [sys.executable, script, "--root", str(root), "dashboard"])
 
 
 def main(argv=None):
