@@ -212,6 +212,67 @@ class AscoTests(unittest.TestCase):
     def test_blocking_ids_handles_beads_dependency_records(self):
         self.assertEqual(asco.blocking_ids({"blocked_by": [{"depends_on_id": "bd-1"}, "bd-2"]}), ["bd-1", "bd-2"])
 
+    def test_dependency_cycles_ignore_closed_tasks_and_find_a_cycle(self):
+        issues = [
+            {"id": "bd-1", "status": "open", "dependencies": [{"id": "bd-2", "dependency_type": "blocks"}]},
+            {"id": "bd-2", "status": "open", "dependencies": [{"id": "bd-1", "dependency_type": "blocks"}]},
+            {"id": "bd-3", "status": "closed", "dependencies": [{"id": "bd-1", "dependency_type": "blocks"}]},
+        ]
+        self.assertEqual(asco.dependency_cycles(issues), [("bd-1", "bd-2")])
+
+    def test_parent_child_cycle_has_one_safe_repair(self):
+        issues = [
+            {"id": "parent", "status": "open", "dependencies": [
+                {"id": "child-a", "dependency_type": "blocks"},
+                {"id": "child-b", "dependency_type": "blocks"},
+            ]},
+            {"id": "child-a", "status": "open", "dependencies": [{"id": "parent", "dependency_type": "parent-child"}]},
+            {"id": "child-b", "status": "open", "dependencies": [{"id": "parent", "dependency_type": "parent-child"}]},
+        ]
+        edges = asco.dependency_edges(issues)
+        self.assertEqual(asco.dependency_cycles(issues, edges), [("child-a", "child-b", "parent")])
+        self.assertEqual(asco.cycle_repair(("child-a", "child-b", "parent"), edges), [
+            ("child-a", "parent", "parent-child"),
+            ("child-b", "parent", "parent-child"),
+        ])
+
+    def test_runner_creates_repair_task_only_for_an_unambiguous_cycle(self):
+        class FakeBeads:
+            def __init__(self):
+                self.calls = []
+            def run(self, *args, **kwargs):
+                self.calls.append(args)
+        runner = asco.Runner("/project", 2)
+        runner.bd = FakeBeads()
+        issues = [
+            {"id": "parent", "status": "open", "dependencies": [{"id": "child", "dependency_type": "blocks"}]},
+            {"id": "child", "status": "open", "dependencies": [{"id": "parent", "dependency_type": "parent-child"}]},
+        ]
+        runner.resolve_dependency_cycles(issues)
+        create = runner.bd.calls[0]
+        self.assertEqual(create[:2], ("create", "Repair Beads dependency cycle: child, parent"))
+        self.assertIn("--metadata", create)
+        self.assertIn("asco_cycle_repair", create[create.index("--metadata") + 1])
+
+    def test_runner_blocks_one_task_when_a_cycle_has_multiple_repairs(self):
+        class FakeBeads:
+            def __init__(self):
+                self.calls = []
+            def run(self, *args, **kwargs):
+                self.calls.append(args)
+            def comment(self, *args):
+                self.calls.append(("comment",) + args)
+        runner = asco.Runner("/project", 2)
+        runner.bd = FakeBeads()
+        issues = [
+            {"id": "bd-1", "status": "open", "dependencies": [{"id": "bd-2", "dependency_type": "blocks"}]},
+            {"id": "bd-2", "status": "open", "dependencies": [{"id": "bd-1", "dependency_type": "blocks"}]},
+        ]
+        runner.resolve_dependency_cycles(issues)
+        self.assertEqual(runner.bd.calls[0][:4], ("update", "bd-1", "--status", "blocked"))
+        self.assertIn("asco_needs_input=true", runner.bd.calls[0])
+        self.assertIn("More than one safe repair exists.", runner.bd.calls[1][2])
+
     def test_escalation_detection_uses_type_or_label(self):
         self.assertTrue(asco.is_escalation({"issue_type": "escalation"}))
         self.assertTrue(asco.is_escalation({"labels": ["escalation"]}))

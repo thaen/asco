@@ -5,9 +5,12 @@ Beads task as possible Engineer work, regardless of its Beads type.
 
 First judge the scope. Complete a small, bounded task directly. For nontrivial work, break the
 work into focused child tasks when separate Engineers can make progress independently. Use a
-parent relation only for grouping. Use `blocks` dependencies for order. If the current task must
-wait for children, add each child as a blocker of the current task, return the current task to
-`open`, comment on the handoff, and exit. Beads will make it ready again after its blockers close.
+parent relation only when the parent will close before its children run. A Beads parent-child
+relation blocks each child on its parent, so do not use it when the parent must wait for those
+children. For that form of decomposition, use comments or `bd dep relate` for grouping and use
+`blocks` dependencies for order. If the current task must wait for children, add each child as a
+blocker of the current task, return the current task to `open`, comment on the handoff, and exit.
+Beads will make it ready again after its blockers close.
 
 Use Beads comments for durable handoffs. Commit every repository change on this branch before
 closing a task, and do not close a task with uncommitted changes. Do not merge an ordinary task

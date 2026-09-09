@@ -138,6 +138,95 @@ def blocking_ids(issue):
     return result
 
 
+def dependency_edges(issues):
+    """Return non-closed dependency edges as (dependent, blocker, type)."""
+    open_issues = {issue_id(issue) for issue in issues if issue.get("status") != "closed"}
+    edges = []
+    for issue in issues:
+        dependent = issue_id(issue)
+        if dependent not in open_issues:
+            continue
+        dependencies = issue.get("dependencies")
+        if dependencies is None:
+            dependencies = issue.get("blocked_by") or issue.get("blockers") or []
+        if isinstance(dependencies, (str, dict)):
+            dependencies = [dependencies]
+        for dependency in dependencies:
+            if isinstance(dependency, str):
+                blocker, relation = dependency, "blocks"
+            elif isinstance(dependency, dict):
+                blocker = dependency.get("id") or dependency.get("issue_id") or dependency.get("depends_on_id")
+                relation = dependency.get("dependency_type") or dependency.get("type") or "blocks"
+            else:
+                continue
+            if blocker in open_issues:
+                edges.append((dependent, blocker, relation))
+    return edges
+
+
+def dependency_cycles(issues, edges=None):
+    """Return the strongly connected non-closed dependency components."""
+    edges = dependency_edges(issues) if edges is None else edges
+    nodes = sorted({issue_id(issue) for issue in issues if issue.get("status") != "closed"})
+    neighbours = {node: [] for node in nodes}
+    for dependent, blocker, _ in edges:
+        neighbours[dependent].append(blocker)
+
+    index = 0
+    stack = []
+    indexes = {}
+    lowlinks = {}
+    on_stack = set()
+    components = []
+
+    def visit(node):
+        nonlocal index
+        indexes[node] = lowlinks[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+        for neighbour in sorted(neighbours[node]):
+            if neighbour not in indexes:
+                visit(neighbour)
+                lowlinks[node] = min(lowlinks[node], lowlinks[neighbour])
+            elif neighbour in on_stack:
+                lowlinks[node] = min(lowlinks[node], indexes[neighbour])
+        if lowlinks[node] == indexes[node]:
+            component = []
+            while True:
+                member = stack.pop()
+                on_stack.remove(member)
+                component.append(member)
+                if member == node:
+                    break
+            component = tuple(sorted(component))
+            if len(component) > 1 or any(source == target == node for source, target, _ in edges):
+                components.append(component)
+
+    for node in nodes:
+        if node not in indexes:
+            visit(node)
+    return sorted(components)
+
+
+def cycle_repair(component, edges):
+    """Return parent-child edges to remove when that is the only safe repair."""
+    members = set(component)
+    cycle_edges = [edge for edge in edges if edge[0] in members and edge[1] in members]
+    removals = [(source, target, relation) for source, target, relation in cycle_edges
+                if relation == "parent-child" and (target, source, "blocks") in cycle_edges]
+    if not removals:
+        return None
+    retained = [edge for edge in cycle_edges if edge not in removals]
+    if dependency_cycles([{"id": member, "status": "open"} for member in component], retained):
+        return None
+    return sorted(removals)
+
+
+def cycle_signature(component):
+    return "dependency-cycle:" + ",".join(component)
+
+
 def dispatcher_processes(root):
     result = subprocess.run(["ps", "-axo", "pid=,etime=,command="], text=True,
                             capture_output=True, check=False)
@@ -247,6 +336,53 @@ class Runner:
                 if not is_escalation(issue) and not has_label(issue, "gt:slot") and
                 (not is_integration(issue) or not active_integration)]
 
+    def repair_task_exists(self, signature, issues):
+        return any(metadata(issue).get("asco_cycle_repair") == signature for issue in issues)
+
+    def create_cycle_repair_task(self, component, removals, signature):
+        graph = "; ".join("%s --%s--> %s" % edge for edge in removals)
+        intended = "; ".join("remove %s --parent-child--> %s; retain %s --blocks--> %s" %
+                               (child, parent, parent, child) for child, parent, _ in removals)
+        description = (
+            "The dispatcher detected the non-closed dependency cycle: %s.\n\n"
+            "The parent-child edges that create the cycle are: %s.\n\n"
+            "The intended dependency graph is: %s. Replace grouping with Beads comments or "
+            "`bd dep relate`; do not add a blocking hierarchy edge.\n\n"
+            "Verification: remove the listed parent-child dependencies with `bd dep remove`, "
+            "confirm each listed `blocks` dependency remains, confirm grouping through comments "
+            "or `relates_to`, and run `bd dep cycles --json` to confirm that this cycle is gone."
+        ) % (", ".join(component), graph, intended)
+        self.bd.run("create", "Repair Beads dependency cycle: %s" % ", ".join(component),
+                    "--description", description, "--type", "task",
+                    "--metadata", json.dumps({"asco_cycle_repair": signature}))
+
+    def request_cycle_input(self, component, edges, signature, issues):
+        affected = next((issue for issue in issues if issue_id(issue) == component[0]), None)
+        if affected is None or metadata(affected).get("asco_cycle_needs_input") == signature:
+            return
+        members = set(component)
+        graph = "; ".join("%s --%s--> %s" % edge for edge in edges
+                            if edge[0] in members and edge[1] in members)
+        comment = (
+            "Asco detected the dependency cycle: %s. The graph is: %s. "
+            "More than one safe repair exists. Choose which dependency or dependencies to remove, "
+            "or state the intended order; removing any edge can change task scheduling."
+        ) % (", ".join(component), graph)
+        self.bd.run("update", issue_id(affected), "--status", "blocked",
+                    "--set-metadata", "asco_needs_input=true",
+                    "--set-metadata", "asco_cycle_needs_input=%s" % signature)
+        self.bd.comment(issue_id(affected), comment)
+
+    def resolve_dependency_cycles(self, issues):
+        edges = dependency_edges(issues)
+        for component in dependency_cycles(issues, edges):
+            signature = cycle_signature(component)
+            removals = cycle_repair(component, edges)
+            if removals and not self.repair_task_exists(signature, issues):
+                self.create_cycle_repair_task(component, removals, signature)
+            elif not removals:
+                self.request_cycle_input(component, edges, signature, issues)
+
     def start(self, issue, issues):
         task = issue_id(issue)
         worktree, branch, log_path = task_paths(self.root, task)
@@ -335,6 +471,8 @@ class Runner:
         issues = self.bd.all()
         self.reap(issues)
         self.cleanup_closed_tasks(self.bd.all())
+        current = self.bd.all()
+        self.resolve_dependency_cycles(current)
         capacity = self.parallel - self.worker_count()
         if capacity <= 0:
             return
