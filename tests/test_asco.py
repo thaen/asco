@@ -308,6 +308,67 @@ class AscoTests(unittest.TestCase):
     def test_status_reports_dispatcher_process(self, dispatchers):
         self.assertIn("Dispatcher: running: 4144", asco.render_status(([], {}), root="/project"))
 
+    def test_dispatcher_processes_excludes_engineer_codex_and_other_repository_records(self):
+        root = Path("/project")
+        script = Path(asco.__file__).resolve()
+        serving = "4144  00:01 %s --root %s _serve --parallel 2" % (script, root)
+        other_repository = "5151  00:01 %s --root /other _serve --parallel 2" % script
+        engineer = "7331  00:01 codex exec --cd %s --task asco-vv1" % root
+        codex = "8118  00:01 codex --root %s run --parallel 2" % root
+
+        class ProcessList:
+            stdout = "\n".join([serving, other_repository, engineer, codex])
+
+        with patch.object(asco.subprocess, "run", return_value=ProcessList()) as process_list:
+            processes = asco.dispatcher_processes(root)
+
+        self.assertEqual(processes, [serving])
+        process_list.assert_called_once_with(
+            ["ps", "-axo", "pid=,etime=,command="], text=True, capture_output=True, check=False)
+
+    def test_main_run_reuses_then_reconfigures_the_dispatcher_without_starting_a_real_process(self):
+        existing = "4144  00:01 %s --root /project _serve --parallel 2" % Path(asco.__file__).resolve()
+        command_lock = object()
+
+        class FakeBeads:
+            instances = []
+
+            def __init__(self, root):
+                self.root = root
+                self.calls = []
+                self.instances.append(self)
+
+            def run(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+
+        class FirstDispatcher:
+            pid = 4144
+
+        class ReplacementDispatcher:
+            pid = 5151
+
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, ".git").mkdir()
+            resolved_root = Path(root).resolve()
+            with patch.object(asco, "Beads", FakeBeads), \
+                 patch.object(asco, "acquire_dispatcher_lock", return_value=command_lock), \
+                 patch.object(asco, "release_dispatcher_lock") as release, \
+                 patch.object(asco, "dispatcher_processes", side_effect=[[], [existing], [existing]]) as processes, \
+                 patch.object(asco, "stop_dispatchers", return_value=[]) as stop, \
+                 patch.object(asco, "start_dispatcher", side_effect=[FirstDispatcher(), ReplacementDispatcher()]) as start, \
+                 patch.object(asco.subprocess, "Popen") as popen:
+                asco.main(["--root", root, "run", "--parallel", "2"])
+                asco.main(["--root", root, "run", "--parallel", "2"])
+                asco.main(["--root", root, "run", "--parallel", "1"])
+
+        self.assertEqual([instance.calls for instance in FakeBeads.instances],
+                         [[(("info",), {})], [(("info",), {})], [(("info",), {})]])
+        self.assertEqual(processes.call_count, 3)
+        self.assertEqual(start.call_args_list, [call(resolved_root, 2), call(resolved_root, 1)])
+        stop.assert_called_once_with([existing])
+        self.assertEqual(release.call_args_list, [call(command_lock)] * 3)
+        popen.assert_not_called()
+
     def test_repeated_dispatcher_requests_at_the_same_limit_keep_the_existing_process(self):
         process = "4144  00:01 python asco.py --root /project _serve --parallel 2"
         lock = object()
