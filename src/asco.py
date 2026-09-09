@@ -225,6 +225,10 @@ class Runner:
                     "--unset-metadata", "asco_exit_state",
                     "--unset-metadata", "asco_exit_code")
 
+    def dispatchable_tasks(self, ready, issues):
+        return [issue for issue in ready if not is_escalation(issue) and
+                (issue_type(issue) == "epic" or self.epic_for(issue, issues))]
+
     def start(self, issue, issues):
         task = issue_id(issue)
         epic = self.epic_for(issue, issues)
@@ -376,7 +380,7 @@ class Runner:
             return
         current = self.bd.all()
         ready = self.bd.ready()
-        dispatchable = [issue for issue in ready if issue_type(issue) == "epic" or self.epic_for(issue, current)]
+        dispatchable = self.dispatchable_tasks(ready, current)
         summary = "ready=%s dispatchable=%s active_workers=%s" % (len(ready), len(dispatchable), self.worker_count())
         if summary != self.last_queue_summary:
             print("%s asco: %s" % (stamp(), summary), flush=True)

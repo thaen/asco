@@ -37,6 +37,12 @@ class AscoTests(unittest.TestCase):
         child = {"id": "bd-2", "parent": "bd-1"}
         self.assertIsNone(runner.epic_for(child, [parent, child]))
 
+    def test_escalation_is_not_dispatchable(self):
+        runner = asco.Runner("/project", 2)
+        epic = {"id": "bd-1", "issue_type": "epic"}
+        escalation = {"id": "bd-2", "issue_type": "escalation", "parent": "bd-1"}
+        self.assertEqual(runner.dispatchable_tasks([epic, escalation], [epic, escalation]), [epic])
+
     def test_blocking_ids_handles_beads_dependency_records(self):
         self.assertEqual(asco.blocking_ids({"blocked_by": [{"depends_on_id": "bd-1"}, "bd-2"]}), ["bd-1", "bd-2"])
 
