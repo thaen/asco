@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import subprocess
 import time
 from contextlib import contextmanager
@@ -19,6 +20,39 @@ class Runner:
         self.prompt_path = prompt_path
         self.state_dir = root / ".asco"
         self.state_dir.mkdir(exist_ok=True)
+
+    def write_status(
+        self,
+        state: str,
+        detail: str = "",
+        *,
+        task_id: str | None = None,
+        engineer_pid: int | None = None,
+        exit_code: int | None = None,
+    ) -> None:
+        """Publish the runner's last state for the terminal dashboard."""
+        path = self.state_dir / "runner-status.json"
+        temporary = path.with_suffix(".tmp")
+        status: dict[str, object] = {
+            "state": state,
+            "detail": detail,
+            "runner_pid": os.getpid(),
+            "updated_at": time.time(),
+        }
+        if task_id is not None:
+            status["task_id"] = task_id
+        if engineer_pid is not None:
+            status["engineer_pid"] = engineer_pid
+        if exit_code is not None:
+            status["exit_code"] = exit_code
+        temporary.write_text(json.dumps(status))
+        temporary.replace(path)
+
+    def log_path_for(self, issue: dict) -> Path:
+        """Return the durable console log path for one task."""
+        log_dir = self.state_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir / f"{issue_id(issue)}.log"
 
     @contextmanager
     def lock(self):
@@ -39,12 +73,25 @@ class Runner:
             return None
         issue = sort_issues(candidates)[0]
         task_id = issue_id(issue)
-        self.beads.update(task_id, "--claim", "--assignee", "asco-runner")
-        self.beads.comment(task_id, "Asco runner claimed this task.")
+        if issue.get("assignee") == "asco-runner":
+            self.beads.update(task_id, "--status", "in_progress")
+            self.beads.comment(task_id, "Asco runner resumed its previously assigned task.")
+        else:
+            self.beads.update(task_id, "--claim", "--assignee", "asco-runner")
+            self.beads.comment(task_id, "Asco runner claimed this task.")
         return self.beads.show(task_id)
 
     def worktree_for(self, issue: dict) -> Path:
         task_id = issue_id(issue)
+        if issue_type(issue) == "audit":
+            metadata = issue.get("metadata") or {}
+            audited_task = metadata.get("asco", {}).get("audit_of")
+            if not audited_task:
+                raise RuntimeError(f"Audit {task_id} has no asco.audit_of worktree reference.")
+            worktree = self.state_dir / "worktrees" / str(audited_task)
+            if not worktree.exists():
+                raise RuntimeError(f"Audit {task_id} needs the worktree for {audited_task}, but it does not exist.")
+            return worktree
         worktree = self.state_dir / "worktrees" / task_id
         if worktree.exists():
             return worktree
@@ -63,36 +110,49 @@ class Runner:
             return False
         task_id = issue_id(issue)
         try:
-            workdir = self.worktree_for(issue) if issue_type(issue) == "engineering" else self.root
-            result = subprocess.run(
-                [
-                    "codex",
-                    "exec",
-                    "--sandbox",
-                    "workspace-write",
-                    "--add-dir",
-                    str(self.root / ".beads"),
-                    "--cd",
-                    str(workdir),
-                    self.prompt_for(issue, workdir),
-                ],
-                cwd=workdir,
-            )
+            workdir = self.worktree_for(issue) if issue_type(issue) in {"engineering", "audit"} else self.root
+            log_path = self.log_path_for(issue)
+            with log_path.open("a") as log:
+                print(f"\n=== Codex started for {task_id} ===", file=log)
+                engineer = subprocess.Popen(
+                    [
+                        "codex",
+                        "exec",
+                        "--sandbox",
+                        "workspace-write",
+                        "--add-dir",
+                        str(self.root / ".beads"),
+                        "--cd",
+                        str(workdir),
+                        self.prompt_for(issue, workdir),
+                    ],
+                    cwd=workdir,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+                self.write_status("working", task_id, task_id=task_id, engineer_pid=engineer.pid)
+                exit_code = engineer.wait()
         except Exception as error:
             self.beads.comment(task_id, f"Asco runner could not start Codex: {error}")
+            self.write_status("error", f"Could not start {task_id}: {error}", task_id=task_id)
             raise
-        if result.returncode:
-            self.beads.comment(task_id, f"Codex exited with status {result.returncode}. The task remains in progress for review.")
+        if exit_code:
+            self.beads.comment(task_id, f"Codex exited with status {exit_code}. Output: {log_path.relative_to(self.root)}. The task remains in progress for review.")
+            self.write_status("idle", f"Codex exited with status {exit_code} for {task_id}.", task_id=task_id, exit_code=exit_code)
         else:
-            self.beads.comment(task_id, "Codex exited normally. The task remains open until it records completion evidence.")
+            self.beads.comment(task_id, f"Codex exited normally. Output: {log_path.relative_to(self.root)}. The task remains open until it records completion evidence.")
+            self.write_status("idle", f"Codex exited normally for {task_id}.", task_id=task_id, exit_code=exit_code)
         return True
 
     def run_forever(self, interval: float = 5.0) -> None:
         with self.lock():
+            self.write_status("idle", "No task is running.")
             while True:
                 try:
                     found_work = self.run_one()
                 except BeadsError as error:
+                    self.write_status("error", str(error))
                     raise RuntimeError(f"Beads rejected a runner action: {error}") from error
                 if not found_work:
+                    self.write_status("idle", "No runnable engineering or audit task exists.")
                     time.sleep(interval)

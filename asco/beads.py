@@ -59,8 +59,77 @@ class Beads:
             value = value.get("issues", value.get("data", []))
         return list(value) if isinstance(value, list) else []
 
+    def all(self) -> list[dict[str, Any]]:
+        """Return one complete view of the native Beads issue store."""
+        return self.list("--all", "--limit", "0")
+
+    def status_snapshot(self) -> list[dict[str, Any]]:
+        """Read every TUI field in one read-only Dolt SQL statement.
+
+        Beads runs this repository in embedded-Dolt mode, where ``bd sql`` is
+        unavailable.  Dolt itself can still query the embedded data directory.
+        This method is deliberately read-only and is for the dashboard only;
+        all work mutations continue to use native ``bd`` commands.
+        """
+        metadata_path = self.root / ".beads" / "metadata.json"
+        try:
+            database = json.loads(metadata_path.read_text())["dolt_database"]
+        except (OSError, json.JSONDecodeError, KeyError) as error:
+            raise BeadsError(f"Could not identify the embedded Beads database: {error}") from error
+        query = f'''USE `{database}`;
+SELECT
+  i.id, i.title, i.status, i.priority, i.issue_type, i.assignee,
+  i.created_at, i.updated_at, i.closed_at,
+  (r.id IS NOT NULL) AS is_ready,
+  (SELECT d.depends_on_issue_id
+     FROM dependencies d
+    WHERE d.issue_id = i.id AND d.type = 'parent-child'
+    LIMIT 1) AS parent,
+  COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT(
+      'depends_on_id', d.depends_on_issue_id,
+      'type', d.type
+    ))
+    FROM dependencies d
+   WHERE d.issue_id = i.id), JSON_ARRAY()) AS dependencies
+FROM issues i
+LEFT JOIN ready_issues r ON r.id = i.id
+ORDER BY i.priority, i.id'''
+        result = subprocess.run(
+            ["dolt", "--data-dir", str(self.root / ".beads" / "embeddeddolt"), "sql", "-q", query, "-r", "json"],
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode:
+            raise BeadsError(result.stderr.strip() or "Dolt could not read the Beads status snapshot.")
+        try:
+            value = json.loads(result.stdout)
+            rows = value.get("rows", [])
+        except (json.JSONDecodeError, AttributeError) as error:
+            raise BeadsError("Dolt did not return a JSON status snapshot.") from error
+        return list(rows) if isinstance(rows, list) else []
+
     def ready(self) -> list[dict[str, Any]]:
         return [issue for issue in self.list() if self.is_runnable(issue)]
+
+    def runnable_from(self, issues: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Find runnable issues from one complete Beads list response."""
+        issue_list = list(issues)
+        by_id = {issue_id(issue): issue for issue in issue_list}
+        return [issue for issue in issue_list if self.is_runnable_from(issue, by_id)]
+
+    @staticmethod
+    def is_runnable_from(issue: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> bool:
+        if issue.get("status") != "open":
+            return False
+        parent = issue.get("parent")
+        if parent and by_id.get(str(parent), {}).get("status") != "closed":
+            return False
+        for dependency in issue.get("dependencies", []):
+            blocker = dependency.get("depends_on_id")
+            if blocker and by_id.get(str(blocker), {}).get("status") != "closed":
+                return False
+        return True
 
     def is_runnable(self, issue: dict[str, Any]) -> bool:
         """Return true only when live parent and blocker records are closed."""

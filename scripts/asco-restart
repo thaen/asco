@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+session_name="${1:-asco-company}"
+project_root="$(git rev-parse --show-toplevel)"
+cd "$project_root"
+shell_command="${SHELL:-/bin/sh}"
+
+if ! tmux has-session -t "$session_name" 2>/dev/null; then
+    printf 'The tmux session %s does not exist. Start it with scripts/asco-tmux.\n' "$session_name" >&2
+    exit 1
+fi
+
+runner_pane="$(tmux show-options -v -t "$session_name" @asco_runner_pane 2>/dev/null || printf '%s' "$session_name:0.0")"
+tui_pane="$(tmux show-options -v -t "$session_name" @asco_tui_pane 2>/dev/null || true)"
+if [ -z "$tui_pane" ]; then
+    tui_pane="$(tmux list-panes -t "$session_name:0" -F '#{pane_id}\t#{pane_start_command}' | awk -F '\t' '$2 ~ /asco\.cli tui/ { print $1; exit }')"
+fi
+if [ -z "$tui_pane" ]; then
+    printf 'The tmux session %s has no Asco TUI pane.\n' "$session_name" >&2
+    exit 1
+fi
+
+tmux set-option -t "$session_name" @asco_runner_pane "$runner_pane"
+tmux set-option -t "$session_name" @asco_tui_pane "$tui_pane"
+
+tmux respawn-pane -k -t "$runner_pane" -c "$project_root" "python3 -m asco.cli run >> .asco/runner.log 2>&1 & printf 'The Asco dispatcher is running in the background. Its output is in .asco/runner.log.\n'; exec $shell_command"
+tmux respawn-pane -k -t "$tui_pane" -c "$project_root" "python3 -m asco.cli tui --tmux-session $(printf '%q' "$session_name")"
+tmux select-pane -t "$tui_pane"
+printf 'Restarted the Asco runner and TUI in tmux session %s.\n' "$session_name"

@@ -8,5 +8,8 @@ version = "0.1.0"
 description = "A small terminal dispatcher for a software company."
 requires-python = ">=3.9"
 
+[project.optional-dependencies]
+test = ["pexpect>=4.9,<5", "pyte>=0.8,<1"]
+
 [tool.setuptools]
 packages = ["asco"]
