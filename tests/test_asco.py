@@ -1,5 +1,11 @@
 import importlib.util
+import json
+import os
+import signal
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import call, patch
@@ -34,6 +40,111 @@ class SnapshotReader:
 
 
 class AscoTests(unittest.TestCase):
+    def setUp(self):
+        self.dispatcher_roots = []
+
+    def tearDown(self):
+        for root in self.dispatcher_roots:
+            for line in asco.dispatcher_processes(root):
+                try:
+                    os.kill(int(line.split()[0]), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+
+    def make_dispatcher_repository(self, issues=None):
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        issues_path = root / "issues.json"
+        issues_path.write_text(json.dumps(issues or []), encoding="utf-8")
+        bead = bin_dir / "bd"
+        bead.write_text("""#!/usr/bin/env python3
+import json
+import os
+import sys
+
+if "--json" in sys.argv:
+    if "ready" in sys.argv:
+        print("[]")
+    else:
+        with open(os.environ["ASCO_TEST_ISSUES"], encoding="utf-8") as source:
+            print(source.read())
+""", encoding="utf-8")
+        bead.chmod(0o755)
+        self.dispatcher_roots.append(root)
+        self.addCleanup(directory.cleanup)
+        environment = dict(os.environ)
+        environment["ASCO_TEST_ISSUES"] = str(issues_path)
+        environment["PATH"] = str(bin_dir) + os.pathsep + environment["PATH"]
+        return root, environment
+
+    def run_dispatcher(self, root, environment, parallel):
+        return subprocess.run(
+            [str(Path(__file__).parents[1] / "asco"), "--root", str(root), "run", "--parallel", str(parallel)],
+            text=True, capture_output=True, check=True, env=environment,
+        )
+
+    def wait_for_dispatcher(self, root, parallel):
+        deadline = time.monotonic() + 3
+        expected = "--parallel %s" % parallel
+        while time.monotonic() < deadline:
+            processes = asco.dispatcher_processes(root)
+            if len(processes) == 1 and expected in processes[0]:
+                return processes[0]
+            time.sleep(0.05)
+        self.fail("The dispatcher did not reach parallel limit %s: %s" %
+                  (parallel, asco.dispatcher_processes(root)))
+
+    def test_run_starts_one_dispatcher_with_its_initial_parallel_limit(self):
+        root, environment = self.make_dispatcher_repository()
+
+        completed = self.run_dispatcher(root, environment, 2)
+
+        self.assertIn("Asco dispatcher started with PID", completed.stdout)
+        self.wait_for_dispatcher(root, 2)
+
+    def test_run_replaces_the_dispatcher_when_the_parallel_limit_increases(self):
+        root, environment = self.make_dispatcher_repository()
+        self.run_dispatcher(root, environment, 1)
+        original = self.wait_for_dispatcher(root, 1).split()[0]
+
+        self.run_dispatcher(root, environment, 3)
+
+        current = self.wait_for_dispatcher(root, 3)
+        self.assertNotEqual(current.split()[0], original)
+
+    def test_run_accepts_a_lower_limit_without_terminating_active_workers(self):
+        worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+
+        def stop_worker():
+            if worker.poll() is None:
+                worker.terminate()
+            worker.wait(timeout=5)
+
+        self.addCleanup(stop_worker)
+        issues = [{"id": "asco-worker", "status": "in_progress",
+                   "metadata": {"asco_pid": str(worker.pid)}}]
+        root, environment = self.make_dispatcher_repository(issues)
+        self.run_dispatcher(root, environment, 3)
+        self.wait_for_dispatcher(root, 3)
+
+        self.run_dispatcher(root, environment, 1)
+
+        self.wait_for_dispatcher(root, 1)
+        self.assertIsNone(worker.poll())
+
+    def test_run_with_the_same_limit_keeps_exactly_one_dispatcher(self):
+        root, environment = self.make_dispatcher_repository()
+        self.run_dispatcher(root, environment, 2)
+        initial = self.wait_for_dispatcher(root, 2).split()[0]
+
+        self.run_dispatcher(root, environment, 2)
+
+        current = self.wait_for_dispatcher(root, 2)
+        self.assertEqual(current.split()[0], initial)
+
     def dashboard_snapshot(self, name):
         return ([{"id": name, "status": "open", "title": name}], {})
 
